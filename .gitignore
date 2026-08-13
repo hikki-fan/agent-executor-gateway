@@ -1,0 +1,17 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment and sensitive data
+.env
+acp_token
+acp_bridge.log
+acp_bridge.pid
+acp_bridge.lock
+acp_watchdog.log
+acp_watchdog.lock
+
+# Temporary and local logs
+*.log
+/tmp/
