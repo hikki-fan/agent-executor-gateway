@@ -1,5 +1,7 @@
 # Antigravity REST Bridge
 
+**English** | [中文文档](./README_CN.md)
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/Version-2.1.0-blue.svg)]()
 [![Status](https://img.shields.io/badge/Status-Production--Ready-brightgreen.svg)]()
