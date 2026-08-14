@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 """
-Custom Antigravity REST Bridge Server for Codex Integration (v2.2.1)
-- Antigravity Language Server (LS) Auto-Discovery & Dynamic Injection (ANTIGRAVITY_LS_ADDRESS)
-- Deep Health Check (Language Server Connectivity Verification)
-- Standalone CLI Fallback (`agy -p`) when LS is offline
-- Reserved Health Capacity (45 POST / 5 Reserved Health)
-- Explicit Pipe Closure & Process Group Tree Cleanup (os.setsid + os.killpg)
-- Socket Timeout (10s) & Bounded Semaphore Admission Control (10 Agent tasks & HTTP 429)
+Custom Antigravity REST Bridge Server for Codex Integration (v2.3.0)
+- Explicit 1:1 Codex Session to Antigravity Conversation Mapping
+- Stateless Gateway (No session pseudo-mapping, client holds conversation_id)
+- Decoupled from global agy -c loop & Language Server (Zero session preemption/hijacking)
+- Per-Conversation Concurrency Locking (HTTP 409 Conflict Protection)
+- Global Concurrency Semaphore (AGY_MAX_CONCURRENCY, default 1, HTTP 429)
+- Configurable Total Agent Timeout Budget (ACP_AGENT_TIMEOUT_SEC, default 300s)
+- Monotonic Deadline Enforcement across subprocesses & retry attempts
+- Reliable CLI Flag Ordering (all options precede -p <prompt>)
+- Strict JSON Object & Status Verification for CLI output
+- Output JSON Parsing with Pre-execution Error Retry (EOF/network <= 3 times on new 0-turn dict only)
+- In-flight Error Preservation (No retry once turns/tokens/response/conversation_id started or if resuming)
+- Explicit Pipe Closure (stdin=DEVNULL) & Process Group Tree Cleanup (os.setsid + os.killpg)
+- Reserved Health Capacity (45 POST / 5 Reserved Health) & Socket Timeout (10s)
 """
 
 import http.server
@@ -18,7 +25,6 @@ import secrets
 import sys
 import signal
 import socket
-import glob
 import re
 import shutil
 import threading
@@ -28,12 +34,10 @@ from concurrent.futures import ThreadPoolExecutor
 PORT = int(os.environ.get("ACP_PORT", 8765))
 AGY_BIN = os.environ.get("AGY_BIN") or shutil.which("agy") or "/home/codex/.local/bin/agy"
 TOKEN_FILE = os.environ.get("ACP_TOKEN_FILE") or "/home/codex/.codex/acp_token"
-AGY_LOG_DIR = os.environ.get("AGY_LOG_DIR") or "/home/codex/.gemini/antigravity-cli/log"
-ACP_PROJECT_ID = os.environ.get("ACP_PROJECT_ID") or "default-cli-project"
 
 MAX_CONTENT_LENGTH = 2 * 1024 * 1024  # 2MB Limit
-SUBPROCESS_TIMEOUT = 60  # 60s timeout for agent subprocesses
-MAX_WORKERS = 10  # Maximum 10 concurrent agent tasks
+SUBPROCESS_TIMEOUT = int(os.environ.get("ACP_AGENT_TIMEOUT_SEC", 300))  # Default 300s total timeout budget
+AGY_MAX_CONCURRENCY = int(os.environ.get("AGY_MAX_CONCURRENCY", 1))  # Default 1 concurrent task
 MAX_HTTP_CONNECTIONS = 50  # Maximum 50 total HTTP connections
 MAX_POST_CONNECTIONS = 45  # Reserved 5 connection slots strictly for /health
 SOCKET_TIMEOUT = 10.0  # 10s socket read/write timeout
@@ -52,8 +56,8 @@ else:
 ACP_AUTH_TOKEN = token_val
 EXPECTED_BEARER_HEADER = f"Bearer {ACP_AUTH_TOKEN}"
 
-# Bounded admission control semaphore: Max 10 agent tasks
-agent_semaphore = threading.BoundedSemaphore(MAX_WORKERS)
+# Bounded admission control semaphore: Global max concurrent agent tasks
+agent_semaphore = threading.BoundedSemaphore(AGY_MAX_CONCURRENCY)
 
 # Total HTTP connection limit: Max 50 HTTP sockets
 http_connection_semaphore = threading.BoundedSemaphore(MAX_HTTP_CONNECTIONS)
@@ -61,127 +65,196 @@ http_connection_semaphore = threading.BoundedSemaphore(MAX_HTTP_CONNECTIONS)
 # Reserved Heavy POST connection limit: Max 45 sockets (Guarantees 5 slots for /health)
 post_connection_semaphore = threading.BoundedSemaphore(MAX_POST_CONNECTIONS)
 
-# Global ThreadPoolExecutor for heavy agent subprocesses
-agent_executor = ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="ACP_AgentWorker")
-ls_discovery_lock = threading.Lock()
-ls_discovery_cache = {"address": None, "expires_at": 0.0}
+# Global ThreadPoolExecutor for agent subprocesses
+agent_executor = ThreadPoolExecutor(max_workers=max(AGY_MAX_CONCURRENCY, 4), thread_name_prefix="ACP_AgentWorker")
 
-def test_ls_connect(addr):
-    """Test TCP socket connection to Language Server address"""
-    if not addr:
-        return False
-    try:
-        host, port = addr.split(":")
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(1.0)
-        s.connect((host, int(port)))
-        s.close()
-        return True
-    except Exception:
-        return False
+class ConversationLockManager:
+    """Thread-safe lock manager ensuring that only one turn per conversation_id runs at a time."""
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._active_conversations = set()
 
-def agy_owns_listening_port(port):
-    """Verify that a local TCP listening socket belongs to the managed `agy -c` process."""
-    target_inodes = set()
-    port_hex = f"{int(port):04X}"
-    for table_path in ("/proc/net/tcp", "/proc/net/tcp6"):
-        try:
-            with open(table_path, "r", encoding="ascii") as table:
-                next(table, None)
-                for line in table:
-                    fields = line.split()
-                    if len(fields) > 9 and fields[1].rsplit(":", 1)[-1].upper() == port_hex and fields[3] == "0A":
-                        target_inodes.add(fields[9])
-        except OSError:
-            pass
-    if not target_inodes:
-        return False
+    def acquire(self, conversation_id):
+        if not conversation_id:
+            return True
+        with self._lock:
+            if conversation_id in self._active_conversations:
+                return False
+            self._active_conversations.add(conversation_id)
+            return True
 
-    socket_links = {f"socket:[{inode}]" for inode in target_inodes}
-    for proc_dir in glob.glob("/proc/[0-9]*"):
-        try:
-            exe_name = os.path.basename(os.readlink(os.path.join(proc_dir, "exe")))
-            if exe_name != "agy":
-                continue
-            with open(os.path.join(proc_dir, "cmdline"), "rb") as cmdline_file:
-                args = [arg.decode("utf-8", errors="ignore") for arg in cmdline_file.read().split(b"\0") if arg]
-            if len(args) < 2 or args[1] != "-c":
-                continue
-            for fd_path in glob.glob(os.path.join(proc_dir, "fd", "*")):
-                try:
-                    if os.readlink(fd_path) in socket_links:
-                        return True
-                except OSError:
-                    pass
-        except OSError:
-            pass
-    return False
+    def release(self, conversation_id):
+        if not conversation_id:
+            return
+        with self._lock:
+            self._active_conversations.discard(conversation_id)
 
-def valid_ls_candidate(addr):
-    """Accept only a reachable local listener owned by the managed agy process."""
-    try:
-        host, port = addr.rsplit(":", 1)
-        return host in ("localhost", "127.0.0.1") and test_ls_connect(addr) and agy_owns_listening_port(int(port))
-    except (AttributeError, TypeError, ValueError):
-        return False
+    def is_locked(self, conversation_id):
+        if not conversation_id:
+            return False
+        with self._lock:
+            return conversation_id in self._active_conversations
 
-def read_log_tail(path, max_bytes=65536):
-    """Read only the tail of an agy log to bound health-check disk I/O."""
-    with open(path, "rb") as log_file:
-        log_file.seek(0, os.SEEK_END)
-        size = log_file.tell()
-        log_file.seek(max(0, size - max_bytes), os.SEEK_SET)
-        return log_file.read().decode("utf-8", errors="ignore")
+conv_lock_mgr = ConversationLockManager()
 
-def discover_ls_address():
+def build_agy_command(prompt, conversation_id=None, model=None, effort=None):
     """
-    Auto-discover live Antigravity Language Server address.
-    Checks environment variables/process environments first, then parses recent agy logs.
-    agy 1.1.13 starts the HTTP Language Server on a random local port but does not
-    export ANTIGRAVITY_LS_ADDRESS in its own process environment.
+    Construct agy CLI command with strict flag ordering:
+    All configuration options precede `-p <prompt>`.
     """
-    with ls_discovery_lock:
-        cached_addr = ls_discovery_cache["address"]
-        if time.monotonic() < ls_discovery_cache["expires_at"] and valid_ls_candidate(cached_addr):
-            return cached_addr
+    cmd = [AGY_BIN]
+    if conversation_id:
+        cmd.extend(['--conversation', str(conversation_id)])
+    cmd.extend(['--output-format', 'json', '--dangerously-skip-permissions'])
+    if model:
+        cmd.extend(['--model', str(model)])
+    if effort:
+        cmd.extend(['--effort', str(effort)])
+    cmd.extend(['-p', str(prompt)])
+    return cmd
 
-        env_addr = os.environ.get("ANTIGRAVITY_LS_ADDRESS")
-        if env_addr and valid_ls_candidate(env_addr):
-            ls_discovery_cache.update(address=env_addr, expires_at=time.monotonic() + 3.0)
-            return env_addr
-
-        for p in glob.glob("/proc/[0-9]*/environ"):
+def run_agent_command(cmd, timeout_sec, env=None):
+    """
+    Execute agy command in an isolated Process Group with standard input closed.
+    Ensures full process group cleanup (SIGKILL) on timeout.
+    """
+    run_env = env if env is not None else os.environ.copy()
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=run_env,
+        start_new_session=True  # Spawns isolated process group; proc.pid is PGID
+    )
+    pgid = proc.pid
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_sec)
+        return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except Exception:
+            pass
+        if proc.stdout:
             try:
-                with open(p, "rb") as f:
-                    content = f.read().decode("utf-8", errors="ignore")
-                    if "ANTIGRAVITY_LS_ADDRESS=" in content:
-                        for item in content.split("\0"):
-                            if item.startswith("ANTIGRAVITY_LS_ADDRESS="):
-                                candidate = item.split("=", 1)[1].strip()
-                                if candidate and valid_ls_candidate(candidate):
-                                    ls_discovery_cache.update(address=candidate, expires_at=time.monotonic() + 3.0)
-                                    return candidate
+                proc.stdout.close()
             except Exception:
                 pass
-
-        # Prefer the newest logs and require the listener to belong to `agy -c`.
-        log_paths = glob.glob(os.path.join(AGY_LOG_DIR, "cli-*.log"))
-        log_paths.sort(key=lambda path: os.path.getmtime(path), reverse=True)
-        port_pattern = re.compile(r"Language server listening on random port at (\d+) for HTTP\b")
-        for path in log_paths[:20]:
+        if proc.stderr:
             try:
-                for line in reversed(read_log_tail(path).splitlines()):
-                    match = port_pattern.search(line)
-                    if match:
-                        port = int(match.group(1))
-                        candidate = f"localhost:{port}"
-                        if valid_ls_candidate(candidate):
-                            ls_discovery_cache.update(address=candidate, expires_at=time.monotonic() + 3.0)
-                            return candidate
-            except (OSError, ValueError):
+                proc.stderr.close()
+            except Exception:
                 pass
-        ls_discovery_cache.update(address=None, expires_at=time.monotonic() + 1.0)
-        return None
+        try:
+            proc.wait(timeout=0.5)
+        except Exception:
+            pass
+        raise
+
+RETRYABLE_ERROR_PATTERNS = re.compile(
+    r'\b(eof|broken pipe|connection reset|connection refused|network|temporary failure|resource temporarily unavailable|timeout before start)\b',
+    re.IGNORECASE
+)
+
+def is_retryable_pre_execution_error(proc_result, parsed_json=None, cmd=None):
+    """
+    Evaluate if an error is a pre-execution transient error eligible for retry.
+    Strict Requirements:
+    - If cmd specifies an explicit continuation (--conversation), NEVER retry.
+    - parsed_json MUST be a valid dict (if JSON missing, corrupted, or non-dict -> DO NOT retry).
+    - parsed_json.get("status") == "ERROR"
+    - parsed_json.get("num_turns", 0) == 0
+    - parsed_json.get("usage", {}).get("total_tokens", 0) == 0
+    - response must be empty / None / whitespace only
+    - conversation_id must NOT exist or be empty (if conversation_id exists -> DO NOT retry).
+    - error message must match retryable patterns (EOF, connection reset, etc.).
+    """
+    if cmd and '--conversation' in cmd:
+        return False
+
+    if not isinstance(parsed_json, dict):
+        return False
+
+    if parsed_json.get("status") != "ERROR":
+        return False
+
+    # Never retry if conversation_id was already allocated or present
+    if parsed_json.get("conversation_id"):
+        return False
+
+    # num_turns must be strictly 0
+    num_turns = parsed_json.get("num_turns", 0)
+    if num_turns != 0:
+        return False
+
+    # usage.total_tokens must be strictly 0
+    usage = parsed_json.get("usage")
+    if isinstance(usage, dict):
+        if usage.get("total_tokens", 0) != 0:
+            return False
+    elif usage is not None:
+        return False
+
+    # response must be empty
+    response_content = parsed_json.get("response", "")
+    if response_content and str(response_content).strip():
+        return False
+
+    # Error message must contain retryable indications
+    err_msg = str(parsed_json.get("error", "")) + " " + str(parsed_json.get("message", ""))
+    if RETRYABLE_ERROR_PATTERNS.search(err_msg):
+        return True
+
+    return False
+
+def execute_with_retry(cmd, total_timeout_sec, max_retries=3):
+    """
+    Execute agy command with monotonic total timeout budget across retry attempts.
+    Continuation commands (containing --conversation) are strictly single-attempt.
+    """
+    is_continuation = '--conversation' in cmd
+    effective_max_retries = 1 if is_continuation else max_retries
+
+    deadline = time.monotonic() + total_timeout_sec
+    attempts = 0
+    last_res = None
+    last_parsed = None
+
+    while attempts < effective_max_retries:
+        attempts += 1
+        now = time.monotonic()
+        remaining = deadline - now
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=total_timeout_sec)
+
+        last_res = run_agent_command(cmd, remaining)
+
+        stdout_text = last_res.stdout.strip() if last_res.stdout else ""
+        try:
+            raw_parsed = json.loads(stdout_text) if stdout_text else None
+            last_parsed = raw_parsed if isinstance(raw_parsed, dict) else None
+        except Exception:
+            last_parsed = None
+
+        # Check if success: returncode == 0, valid JSON dict, status == "SUCCESS"
+        if last_res.returncode == 0 and isinstance(last_parsed, dict) and last_parsed.get("status") == "SUCCESS":
+            return last_res, last_parsed
+
+        # Check if eligible for pre-execution retry
+        if attempts < effective_max_retries and is_retryable_pre_execution_error(last_res, last_parsed, cmd=cmd):
+            backoff = 0.3 * attempts
+            if (deadline - time.monotonic()) > backoff:
+                time.sleep(backoff)
+                continue
+            else:
+                raise subprocess.TimeoutExpired(cmd=cmd, timeout=total_timeout_sec)
+
+        # Non-retryable failure or retries exhausted
+        break
+
+    return last_res, last_parsed
 
 class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
     def _send_json(self, data, status=200):
@@ -209,27 +282,26 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.rstrip('/')
         if path == '/health' or path == '/acp/v1/status':
-            ls_addr = discover_ls_address()
-            ls_connected = test_ls_connect(ls_addr)
             self._send_json({
                 'status': 'online',
                 'service': 'Antigravity REST Bridge Server',
-                'version': '2.2.1',
+                'version': '2.3.0',
                 'auth_type': 'Strict Bearer Token',
+                'mode': 'explicit_conversation_cli',
                 'language_server': {
-                    'status': 'connected' if ls_connected else 'offline',
-                    'address': ls_addr if ls_connected else None,
-                    'mode': 'agentapi_ipc' if ls_connected else 'standalone_fallback'
+                    'status': 'disabled',
+                    'address': None,
+                    'mode': 'explicit_conversation_cli'
                 },
                 'limits': {
                     'max_payload_bytes': MAX_CONTENT_LENGTH,
                     'subprocess_timeout_sec': SUBPROCESS_TIMEOUT,
-                    'max_worker_threads': MAX_WORKERS,
+                    'max_worker_threads': AGY_MAX_CONCURRENCY,
                     'max_http_connections': MAX_HTTP_CONNECTIONS,
                     'max_post_connections': MAX_POST_CONNECTIONS,
                     'reserved_health_slots': MAX_HTTP_CONNECTIONS - MAX_POST_CONNECTIONS,
                     'socket_timeout_sec': SOCKET_TIMEOUT,
-                    'admission_control': 'HTTP 429 Bounded Semaphore (10)'
+                    'admission_control': f'HTTP 429 Bounded Semaphore ({AGY_MAX_CONCURRENCY})'
                 }
             })
         else:
@@ -268,175 +340,230 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 return self._send_json({'error': f'Invalid JSON payload: {str(e)}'}, status=400)
 
-            # Dynamic LS Address discovery & environment injection
-            ls_address = discover_ls_address()
-            env = os.environ.copy()
-            if ls_address:
-                env["ANTIGRAVITY_LS_ADDRESS"] = ls_address
-                # Required by agy 1.1.13 when agentapi includes workspace environment data.
-                env.setdefault("ANTIGRAVITY_PROJECT_ID", ACP_PROJECT_ID)
+            # 3. Handle Endpoints
+            if path in ['/acp/v1/invoke', '/acp/v1/new-conversation']:
+                prompt = payload.get('prompt', '')
+                model = payload.get('model')
+                effort = payload.get('effort')
+                # Extract explicit conversation_id (or recipient_id for backward compat)
+                conversation_id = payload.get('conversation_id') or payload.get('recipient_id') or ''
+                conversation_id = str(conversation_id).strip()
 
-            # Helper for process-group execution with LS environment injection
-            def run_agent_command(cmd, timeout_sec):
-                proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    env=env,
-                    start_new_session=True  # Spawns isolated process group; proc.pid is PGID
-                )
-                pgid = proc.pid
+                if not prompt:
+                    return self._send_json({'error': 'Parameter "prompt" is required'}, status=400)
+
+                # 4. Check per-conversation concurrency lock (HTTP 409)
+                if conversation_id and not conv_lock_mgr.acquire(conversation_id):
+                    return self._send_json({
+                        'status': 'error',
+                        'error': f'Conflict: Conversation {conversation_id} is currently executing another turn',
+                        'status_code': 409
+                    }, status=409)
+
+                # 5. Check global concurrency semaphore (HTTP 429)
+                acquired_agent = agent_semaphore.acquire(blocking=False)
+                if not acquired_agent:
+                    if conversation_id:
+                        conv_lock_mgr.release(conversation_id)
+                    return self._send_json({
+                        'status': 'error',
+                        'error': f'Too Many Requests: Maximum {AGY_MAX_CONCURRENCY} concurrent agent tasks active',
+                        'status_code': 429
+                    }, status=429)
+
                 try:
-                    stdout, stderr = proc.communicate(timeout=timeout_sec)
-                    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
-                except subprocess.TimeoutExpired:
-                    try:
-                        os.killpg(pgid, signal.SIGKILL)
-                    except Exception:
-                        pass
-                    if proc.stdout:
-                        try:
-                            proc.stdout.close()
-                        except Exception:
-                            pass
-                    if proc.stderr:
-                        try:
-                            proc.stderr.close()
-                        except Exception:
-                            pass
-                    try:
-                        proc.wait(timeout=0.2)
-                    except Exception:
-                        pass
-                    raise
-
-            # 3. Admission Control: Try acquiring non-blocking semaphore
-            acquired_agent = agent_semaphore.acquire(blocking=False)
-            if not acquired_agent:
-                return self._send_json({
-                    'error': 'Too Many Requests: Maximum 10 concurrent agent tasks active',
-                    'status_code': 429
-                }, status=429)
-
-            try:
-                if path in ['/acp/v1/invoke', '/acp/v1/new-conversation']:
-                    prompt = payload.get('prompt', '')
-                    model = payload.get('model', '')
-                    title = payload.get('title', '')
-
-                    if not prompt:
-                        return self._send_json({'error': 'Parameter "prompt" is required'}, status=400)
-
-                    # Choose execution strategy: agentapi IPC (if LS online) or standalone agy -p
-                    if ls_address:
-                        cmd = [AGY_BIN, 'agentapi', 'new-conversation']
-                        if model:
-                            cmd.append(f'--model={model}')
-                        if title:
-                            cmd.append(f'--title={title}')
-                        cmd.append(prompt)
-                    else:
-                        # Fallback: standalone print mode
-                        cmd = [AGY_BIN, '-p', prompt, '--dangerously-skip-permissions', '--output-format', 'json']
-                        if model:
-                            cmd.extend(['--model', model])
-
+                    cmd = build_agy_command(prompt, conversation_id=conversation_id if conversation_id else None, model=model, effort=effort)
                     future = None
                     try:
-                        future = agent_executor.submit(run_agent_command, cmd, SUBPROCESS_TIMEOUT)
-                        res = future.result(timeout=SUBPROCESS_TIMEOUT + 2)
-                        if res.returncode == 0:
+                        future = agent_executor.submit(execute_with_retry, cmd, SUBPROCESS_TIMEOUT, 3)
+                        res, parsed = future.result(timeout=SUBPROCESS_TIMEOUT + 5)
+
+                        out_text = res.stdout.strip() if res.stdout else ""
+                        err_text = res.stderr.strip() if res.stderr else ""
+
+                        # Strict validation:
+                        # 1. returncode == 0
+                        # 2. parsed must be a valid dict
+                        # 3. parsed.get("status") == "SUCCESS"
+                        # 4. For new conversation: parsed must have top-level conversation_id
+                        is_valid_success = (
+                            res.returncode == 0 and
+                            isinstance(parsed, dict) and
+                            parsed.get("status") == "SUCCESS"
+                        )
+
+                        if is_valid_success:
+                            if conversation_id:
+                                out_cid = conversation_id
+                            else:
+                                top_cid = parsed.get("conversation_id")
+                                if top_cid and str(top_cid).strip():
+                                    out_cid = str(top_cid).strip()
+                                else:
+                                    out_cid = None
+                                    is_valid_success = False
+
+                        if is_valid_success:
                             self._send_json({
                                 'status': 'success',
-                                'action': 'new-conversation',
-                                'mode': 'agentapi_ipc' if ls_address else 'standalone_cli',
-                                'output': res.stdout.strip()
+                                'action': 'invoke' if conversation_id else 'new-conversation',
+                                'conversation_id': str(out_cid),
+                                'mode': 'explicit_conversation_cli',
+                                'output': out_text,
+                                'parsed': parsed
                             })
                         else:
+                            error_detail = ""
+                            if isinstance(parsed, dict) and parsed.get("status") == "SUCCESS" and not conversation_id and not parsed.get("conversation_id"):
+                                error_detail = "CLI returned status: SUCCESS but missing required top-level 'conversation_id' field in JSON"
+                            elif isinstance(parsed, dict) and parsed.get("error"):
+                                error_detail = str(parsed.get("error"))
+                            elif err_text:
+                                error_detail = err_text
+                            elif not isinstance(parsed, dict):
+                                error_detail = "CLI output is not a valid JSON object"
+                            elif parsed.get("status") != "SUCCESS":
+                                error_detail = f"CLI returned status: {parsed.get('status')}"
+                            else:
+                                error_detail = f"CLI process exited with code {res.returncode}"
+
                             self._send_json({
                                 'status': 'error',
-                                'error': res.stderr.strip() or res.stdout.strip()
+                                'action': 'invoke' if conversation_id else 'new-conversation',
+                                'conversation_id': conversation_id if conversation_id else None,
+                                'mode': 'explicit_conversation_cli',
+                                'error': error_detail,
+                                'output': out_text,
+                                'parsed': parsed
                             }, status=500)
+                    except subprocess.TimeoutExpired:
+                        if future:
+                            future.cancel()
+                        self._send_json({
+                            'status': 'error',
+                            'error': f'Agent Execution Timed Out after total budget of {SUBPROCESS_TIMEOUT}s',
+                            'conversation_id': conversation_id if conversation_id else None,
+                            'status_code': 504
+                        }, status=504)
                     except Exception as e:
                         if future:
                             future.cancel()
                         self._send_json({
                             'status': 'error',
-                            'error': f'Agent Execution Timed Out or Failed: {str(e)}'
+                            'error': f'Agent Execution Failed: {str(e)}',
+                            'conversation_id': conversation_id if conversation_id else None
                         }, status=504)
+                finally:
+                    agent_semaphore.release()
+                    if conversation_id:
+                        conv_lock_mgr.release(conversation_id)
 
-                elif path == '/acp/v1/send-message':
-                    recipient_id = payload.get('recipient_id', '')
-                    content = payload.get('content', '')
-                    title = payload.get('title', '')
+            elif path == '/acp/v1/send-message':
+                recipient_id = payload.get('recipient_id') or payload.get('conversation_id') or ''
+                recipient_id = str(recipient_id).strip()
+                content = payload.get('content') or payload.get('prompt') or ''
+                model = payload.get('model')
+                effort = payload.get('effort')
 
-                    if not recipient_id or not content:
-                        return self._send_json({'error': 'Parameters "recipient_id" and "content" are required'}, status=400)
+                if not recipient_id or not content:
+                    return self._send_json({'error': 'Parameters "recipient_id" and "content" are required'}, status=400)
 
-                    if not ls_address:
-                        return self._send_json({'error': 'Cannot send message: Antigravity Language Server is offline'}, status=503)
+                # Check per-conversation concurrency lock (HTTP 409)
+                if not conv_lock_mgr.acquire(recipient_id):
+                    return self._send_json({
+                        'status': 'error',
+                        'error': f'Conflict: Conversation {recipient_id} is currently executing another turn',
+                        'status_code': 409
+                    }, status=409)
 
-                    cmd = [AGY_BIN, 'agentapi', 'send-message']
-                    if title:
-                        cmd.append(f'--title={title}')
-                    cmd.extend([recipient_id, content])
+                # Check global concurrency semaphore (HTTP 429)
+                acquired_agent = agent_semaphore.acquire(blocking=False)
+                if not acquired_agent:
+                    conv_lock_mgr.release(recipient_id)
+                    return self._send_json({
+                        'status': 'error',
+                        'error': f'Too Many Requests: Maximum {AGY_MAX_CONCURRENCY} concurrent agent tasks active',
+                        'status_code': 429
+                    }, status=429)
 
+                try:
+                    cmd = build_agy_command(content, conversation_id=recipient_id, model=model, effort=effort)
                     future = None
                     try:
-                        future = agent_executor.submit(run_agent_command, cmd, SUBPROCESS_TIMEOUT)
-                        res = future.result(timeout=SUBPROCESS_TIMEOUT + 2)
-                        if res.returncode == 0:
+                        future = agent_executor.submit(execute_with_retry, cmd, SUBPROCESS_TIMEOUT, 3)
+                        res, parsed = future.result(timeout=SUBPROCESS_TIMEOUT + 5)
+
+                        out_text = res.stdout.strip() if res.stdout else ""
+                        err_text = res.stderr.strip() if res.stderr else ""
+
+                        is_valid_success = (
+                            res.returncode == 0 and
+                            isinstance(parsed, dict) and
+                            parsed.get("status") == "SUCCESS"
+                        )
+
+                        if is_valid_success:
                             self._send_json({
                                 'status': 'success',
                                 'action': 'send-message',
-                                'output': res.stdout.strip()
+                                'conversation_id': recipient_id,
+                                'mode': 'explicit_conversation_cli',
+                                'output': out_text,
+                                'parsed': parsed
                             })
                         else:
+                            error_detail = ""
+                            if isinstance(parsed, dict) and parsed.get("error"):
+                                error_detail = str(parsed.get("error"))
+                            elif err_text:
+                                error_detail = err_text
+                            elif not isinstance(parsed, dict):
+                                error_detail = "CLI output is not a valid JSON object"
+                            elif parsed.get("status") != "SUCCESS":
+                                error_detail = f"CLI returned status: {parsed.get('status')}"
+                            else:
+                                error_detail = f"CLI process exited with code {res.returncode}"
+
                             self._send_json({
                                 'status': 'error',
-                                'error': res.stderr.strip()
+                                'action': 'send-message',
+                                'conversation_id': recipient_id,
+                                'mode': 'explicit_conversation_cli',
+                                'error': error_detail,
+                                'output': out_text,
+                                'parsed': parsed
                             }, status=500)
+                    except subprocess.TimeoutExpired:
+                        if future:
+                            future.cancel()
+                        self._send_json({
+                            'status': 'error',
+                            'error': f'Agent Message Timed Out after total budget of {SUBPROCESS_TIMEOUT}s',
+                            'conversation_id': recipient_id,
+                            'status_code': 504
+                        }, status=504)
                     except Exception as e:
                         if future:
                             future.cancel()
                         self._send_json({
                             'status': 'error',
-                            'error': f'Agent Message Timed Out or Failed: {str(e)}'
+                            'error': f'Agent Message Failed: {str(e)}',
+                            'conversation_id': recipient_id
                         }, status=504)
+                finally:
+                    agent_semaphore.release()
+                    conv_lock_mgr.release(recipient_id)
 
-                elif path == '/acp/v1/metadata':
-                    conversation_id = payload.get('conversation_id', '')
-                    if not conversation_id:
-                        return self._send_json({'error': 'Parameter "conversation_id" is required'}, status=400)
+            elif path == '/acp/v1/metadata':
+                # Metadata endpoint requires Language Server IPC which is disabled in explicit conversation CLI mode.
+                self._send_json({
+                    'status': 'error',
+                    'error': 'Metadata endpoint is not supported in explicit conversation CLI mode without Language Server',
+                    'status_code': 501
+                }, status=501)
 
-                    if not ls_address:
-                        return self._send_json({'error': 'Cannot fetch metadata: Antigravity Language Server is offline'}, status=503)
-
-                    cmd = [AGY_BIN, 'agentapi', 'get-conversation-metadata', conversation_id]
-                    future = None
-                    try:
-                        future = agent_executor.submit(run_agent_command, cmd, 15)
-                        res = future.result(timeout=18)
-                        if res.returncode == 0:
-                            self._send_json({
-                                'status': 'success',
-                                'action': 'get-metadata',
-                                'output': res.stdout.strip()
-                            })
-                        else:
-                            self._send_json({
-                                'status': 'error',
-                                'error': res.stderr.strip()
-                            }, status=500)
-                    except Exception as e:
-                        if future:
-                            future.cancel()
-                        self._send_json({'status': 'error', 'error': f'Metadata fetch failed: {str(e)}'}, status=504)
-                else:
-                    self._send_json({'error': f'Unknown path: {path}'}, status=404)
-            finally:
-                agent_semaphore.release()
+            else:
+                self._send_json({'error': f'Unknown path: {path}'}, status=404)
         finally:
             post_connection_semaphore.release()
 
@@ -488,12 +615,12 @@ def sigterm_handler(signum, frame):
 def run_server():
     global server_instance
     server_instance = ThreadedHTTPServer(('127.0.0.1', PORT), ACPRequestHandler)
-    
-    # Register SIGTERM and SIGINT signal handlers
+
     signal.signal(signal.SIGTERM, sigterm_handler)
     signal.signal(signal.SIGINT, sigterm_handler)
-    
+
     print(f"[*] Custom Antigravity REST Bridge Server listening on http://127.0.0.1:{PORT}")
+    print(f"[*] Mode=explicit_conversation_cli, AGY_MAX_CONCURRENCY={AGY_MAX_CONCURRENCY}, TimeoutBudget={SUBPROCESS_TIMEOUT}s")
     print(f"[*] Max HTTP Connections={MAX_HTTP_CONNECTIONS}, Socket Timeout={SOCKET_TIMEOUT}s")
     print(f"[*] Token auth: Strict Bearer from {TOKEN_FILE}")
 

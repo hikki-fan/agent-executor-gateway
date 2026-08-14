@@ -1,22 +1,65 @@
 #!/usr/bin/env python3
 """
-ACP CLI Client with Explicit Non-Zero Exit Codes on Failure
+ACP CLI Client with Configurable Timeout and Explicit Non-Zero Exit Codes
 """
 
 import sys
 import os
 import json
+import re
 import urllib.request
 import urllib.error
 
-TOKEN_FILE = "/home/codex/.codex/acp_token"
+TOKEN_FILE = os.environ.get("ACP_TOKEN_FILE") or "/home/codex/.codex/acp_token"
 SERVER_URL = os.environ.get("ACP_SERVER_URL", "http://127.0.0.1:8765")
+CLIENT_TIMEOUT = int(os.environ.get("ACP_CLIENT_TIMEOUT_SEC", int(os.environ.get("ACP_AGENT_TIMEOUT_SEC", 300)) + 30))
 
 def get_token():
     if os.path.exists(TOKEN_FILE):
         with open(TOKEN_FILE, "r") as f:
             return f.read().strip()
     return ""
+
+def parse_invoke_args(argv_slice):
+    """
+    Parse arguments for invoke/new action.
+    Supports:
+    - acp-cli invoke "prompt..."
+    - acp-cli invoke --conversation <uuid> "prompt..."
+    - acp-cli invoke --conversation=<uuid> "prompt..."
+    - acp-cli invoke -c <uuid> "prompt..."
+    - acp-cli invoke <uuid> "prompt..." (positional backward compatibility)
+    Returns: (conversation_id, prompt_text)
+    """
+    if not argv_slice:
+        return None, ""
+
+    cid = None
+    remaining = []
+    i = 0
+    while i < len(argv_slice):
+        arg = argv_slice[i]
+        if arg in ('--conversation', '-c') and i + 1 < len(argv_slice):
+            cid = argv_slice[i + 1]
+            i += 2
+        elif arg.startswith('--conversation='):
+            cid = arg.split('=', 1)[1]
+            i += 1
+        elif arg.startswith('-c='):
+            cid = arg.split('=', 1)[1]
+            i += 1
+        else:
+            remaining.append(arg)
+            i += 1
+
+    uuid_pattern = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    if cid is None and len(remaining) >= 2 and re.match(uuid_pattern, remaining[0], re.IGNORECASE):
+        cid = remaining[0]
+        prompt = " ".join(remaining[1:])
+    else:
+        prompt = " ".join(remaining)
+
+    return cid, prompt
 
 def make_request(path, data=None, token=None):
     url = f"{SERVER_URL.rstrip('/')}{path}"
@@ -28,10 +71,9 @@ def make_request(path, data=None, token=None):
     req = urllib.request.Request(url, data=body, headers=headers, method='POST' if data is not None else 'GET')
 
     try:
-        with urllib.request.urlopen(req, timeout=65) as response:
+        with urllib.request.urlopen(req, timeout=CLIENT_TIMEOUT) as response:
             res_body = response.read().decode('utf-8')
             parsed = json.loads(res_body)
-            # If server returned json with status: error, exit non-zero
             if parsed.get('status') == 'error':
                 return parsed, 1
             return parsed, 0
@@ -39,7 +81,7 @@ def make_request(path, data=None, token=None):
         err_body = e.read().decode('utf-8')
         try:
             parsed = json.loads(err_body)
-        except:
+        except Exception:
             parsed = {'error': f'HTTP Error {e.code}: {e.reason}'}
         return parsed, (e.code if e.code != 200 else 1)
     except Exception as e:
@@ -51,6 +93,7 @@ def main():
         print("Examples:")
         print("  acp-cli status")
         print("  acp-cli invoke \"分析代码: /workspace/processor.py\"")
+        print("  acp-cli invoke --conversation <conversation_id> \"继续处理下一阶段\"")
         print("  acp-cli send <conversation_id> \"继续处理\"")
         sys.exit(0)
 
@@ -66,8 +109,14 @@ def main():
         if len(sys.argv) < 3:
             print("Error: Prompt text required")
             sys.exit(1)
-        prompt = " ".join(sys.argv[2:])
-        res, code = make_request('/acp/v1/invoke', {'prompt': prompt}, token=token)
+        cid, prompt = parse_invoke_args(sys.argv[2:])
+        if not prompt:
+            print("Error: Prompt text required")
+            sys.exit(1)
+        payload = {'prompt': prompt}
+        if cid:
+            payload['conversation_id'] = cid
+        res, code = make_request('/acp/v1/invoke', payload, token=token)
         print(json.dumps(res, indent=2, ensure_ascii=False))
         sys.exit(code if code == 0 else 1)
 
