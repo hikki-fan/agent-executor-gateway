@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Continuous Background Supervisor / Watchdog for ACP REST Bridge Server
-# Featuring Singleton File Lock, TTY FD Cleanup, and Lock FD Isolation.
+# Continuous Background Supervisor / Watchdog for ACP REST Bridge & Language Server (v2.2.0)
+# Featuring Singleton File Lock, TTY FD Cleanup, and Auto-Recovery for both Bridge & agy LS.
 
 LOCK_FILE="/home/codex/.codex/acp_watchdog.lock"
 WATCHDOG_LOG="/home/codex/.codex/acp_watchdog.log"
@@ -28,9 +28,20 @@ chmod 600 "$WATCHDOG_LOG"
 
 echo "[$(date)] ACP Watchdog Supervisor (Singleton) started" >> "$WATCHDOG_LOG"
 
+ensure_agy_daemon() {
+    if ! pgrep -f "agy -c" >/dev/null 2>&1; then
+        echo "[$(date)] agy Language Server offline. Restoring in background tmux session..." >> "$WATCHDOG_LOG"
+        tmux has-session -t agy 2>/dev/null || tmux new-session -d -s agy 'cd /workspace && agy -c; exec bash'
+    fi
+}
+
 while true; do
+    # 1. Ensure agy Language Server daemon is alive in tmux
+    ensure_agy_daemon
+
+    # 2. Ensure ACP REST Bridge is healthy
     if ! curl -fsS --connect-timeout 2 -m 3 "http://127.0.0.1:8765/health" 2>/dev/null | grep -q "Antigravity REST Bridge Server"; then
-        echo "[$(date)] Service down or unresponsive. Triggering recovery..." >> "$WATCHDOG_LOG"
+        echo "[$(date)] Bridge down or unresponsive. Triggering recovery..." >> "$WATCHDOG_LOG"
         "$SCRIPT_LAUNCHER" 201>&- 200>&- >> "$WATCHDOG_LOG" 2>&1
     fi
     sleep 5
