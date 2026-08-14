@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Production-grade Daemon Launcher for ACP REST Bridge Server
-# Featuring Atomic Locking, Strict PID & Executable Verification (/proc/$pid/exe + argv[1]),
+# Production-grade Daemon Launcher for ACP REST Bridge Server (v2.2.0)
+# Featuring Setsid Detachment (-f), Atomic Locking, Strict PID & Executable Verification,
 # Lock FD Isolation (200>&- 201>&-), Deadlock-Free SIGTERM Graceful Shutdown with 65s Buffer,
 # and Killing Unhealthy NEW_PID with Exit 1 on Readiness Failure.
 
@@ -67,15 +67,12 @@ if ! is_healthy; then
         rm -f "$PID_FILE"
     fi
 
-    # 2. Launch detached background process (closing lock FDs 200 & 201)
+    # 2. Launch detached background daemon process
     touch "$LOG_FILE" "$PID_FILE"
     chmod 600 "$LOG_FILE" "$PID_FILE"
     
-    nohup python3 "$SCRIPT_PATH" 201>&- 200>&- >> "$LOG_FILE" 2>&1 &
-    NEW_PID=$!
-    echo "$NEW_PID" > "$PID_FILE"
-    disown "$NEW_PID" 2>/dev/null
-
+    setsid -f python3 "$SCRIPT_PATH" </dev/null 201>&- 200>&- >> "$LOG_FILE" 2>&1
+    
     # 3. Synchronous Readiness Polling: Wait for service to become healthy while holding the lock (up to 6s)
     healthy_ready=0
     for i in {1..60}; do
@@ -86,14 +83,13 @@ if ! is_healthy; then
         sleep 0.1
     done
 
-    # 4. If readiness fails, kill NEW_PID and exit non-zero
-    if [ "$healthy_ready" -eq 0 ]; then
+    # 4. If readiness succeeds, find the new PID
+    if [ "$healthy_ready" -eq 1 ]; then
+        pgrep -f "$SCRIPT_PATH" | head -n 1 > "$PID_FILE"
+        chmod 600 "$PID_FILE"
+    else
         echo "[!] Error: ACP REST Bridge failed to become healthy within 6 seconds." >&2
-        if kill -0 "$NEW_PID" 2>/dev/null; then
-            kill -15 "$NEW_PID" 2>/dev/null
-            sleep 0.5
-            kill -9 "$NEW_PID" 2>/dev/null
-        fi
+        pkill -f "$SCRIPT_PATH" 2>/dev/null || true
         rm -f "$PID_FILE"
         exit 1
     fi

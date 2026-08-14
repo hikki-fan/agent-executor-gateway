@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-Custom Antigravity REST Bridge Server for Codex Integration
-Reserved Health Connection Capacity (45 POST / 5 Reserved Health),
-Explicit Pipe Closure on Subprocess Timeout, Cached PGID Process Group Termination,
-Socket Read Timeout (10s), Bounded Semaphore Admission Control (10 Agent tasks & HTTP 429).
+Custom Antigravity REST Bridge Server for Codex Integration (v2.2.0)
+- Antigravity Language Server (LS) Auto-Discovery & Dynamic Injection (ANTIGRAVITY_LS_ADDRESS)
+- Deep Health Check (Language Server Connectivity Verification)
+- Standalone CLI Fallback (`agy -p`) when LS is offline
+- Reserved Health Capacity (45 POST / 5 Reserved Health)
+- Explicit Pipe Closure & Process Group Tree Cleanup (os.setsid + os.killpg)
+- Socket Timeout (10s) & Bounded Semaphore Admission Control (10 Agent tasks & HTTP 429)
 """
 
 import http.server
@@ -14,12 +17,15 @@ import os
 import secrets
 import sys
 import signal
+import socket
+import glob
+import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
 PORT = int(os.environ.get("ACP_PORT", 8765))
-AGY_BIN = "/home/codex/.local/bin/agy"
-TOKEN_FILE = "/home/codex/.codex/acp_token"
+AGY_BIN = os.environ.get("AGY_BIN") or shutil.which("agy") or "/home/codex/.local/bin/agy"
+TOKEN_FILE = os.environ.get("ACP_TOKEN_FILE") or "/home/codex/.codex/acp_token"
 
 MAX_CONTENT_LENGTH = 2 * 1024 * 1024  # 2MB Limit
 SUBPROCESS_TIMEOUT = 60  # 60s timeout for agent subprocesses
@@ -54,6 +60,43 @@ post_connection_semaphore = threading.BoundedSemaphore(MAX_POST_CONNECTIONS)
 # Global ThreadPoolExecutor for heavy agent subprocesses
 agent_executor = ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="ACP_AgentWorker")
 
+def test_ls_connect(addr):
+    """Test TCP socket connection to Language Server address"""
+    if not addr:
+        return False
+    try:
+        host, port = addr.split(":")
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(1.0)
+        s.connect((host, int(port)))
+        s.close()
+        return True
+    except Exception:
+        return False
+
+def discover_ls_address():
+    """
+    Auto-discover live Antigravity Language Server address.
+    Checks environment variable, then inspects active process environments in /proc/*/environ.
+    """
+    env_addr = os.environ.get("ANTIGRAVITY_LS_ADDRESS")
+    if env_addr and test_ls_connect(env_addr):
+        return env_addr
+
+    for p in glob.glob("/proc/[0-9]*/environ"):
+        try:
+            with open(p, "rb") as f:
+                content = f.read().decode("utf-8", errors="ignore")
+                if "ANTIGRAVITY_LS_ADDRESS=" in content:
+                    for item in content.split("\0"):
+                        if item.startswith("ANTIGRAVITY_LS_ADDRESS="):
+                            candidate = item.split("=", 1)[1].strip()
+                            if candidate and test_ls_connect(candidate):
+                                return candidate
+        except Exception:
+            pass
+    return None
+
 class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
     def _send_json(self, data, status=200):
         try:
@@ -80,12 +123,18 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.rstrip('/')
         if path == '/health' or path == '/acp/v1/status':
+            ls_addr = discover_ls_address()
+            ls_connected = test_ls_connect(ls_addr)
             self._send_json({
                 'status': 'online',
                 'service': 'Antigravity REST Bridge Server',
-                'version': '2.1.0',
+                'version': '2.2.0',
                 'auth_type': 'Strict Bearer Token',
-                'token_file': TOKEN_FILE,
+                'language_server': {
+                    'status': 'connected' if ls_connected else 'offline',
+                    'address': ls_addr if ls_connected else None,
+                    'mode': 'agentapi_ipc' if ls_connected else 'standalone_fallback'
+                },
                 'limits': {
                     'max_payload_bytes': MAX_CONTENT_LENGTH,
                     'subprocess_timeout_sec': SUBPROCESS_TIMEOUT,
@@ -116,8 +165,7 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
             if not self._verify_strict_bearer_auth():
                 return self._send_json({
                     'error': 'Unauthorized: Strict Bearer token required',
-                    'required_header': 'Authorization: Bearer <TOKEN>',
-                    'token_file': TOKEN_FILE
+                    'required_header': 'Authorization: Bearer <TOKEN>'
                 }, status=401)
 
             # 2. Payload Size Limit Check
@@ -134,13 +182,20 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 return self._send_json({'error': f'Invalid JSON payload: {str(e)}'}, status=400)
 
-            # Process-Group execution helper with explicit Pipe closure and non-blocking wait
+            # Dynamic LS Address discovery & environment injection
+            ls_address = discover_ls_address()
+            env = os.environ.copy()
+            if ls_address:
+                env["ANTIGRAVITY_LS_ADDRESS"] = ls_address
+
+            # Helper for process-group execution with LS environment injection
             def run_agent_command(cmd, timeout_sec):
                 proc = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
+                    env=env,
                     start_new_session=True  # Spawns isolated process group; proc.pid is PGID
                 )
                 pgid = proc.pid
@@ -148,12 +203,10 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
                     stdout, stderr = proc.communicate(timeout=timeout_sec)
                     return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
                 except subprocess.TimeoutExpired:
-                    # Signal PGID
                     try:
                         os.killpg(pgid, signal.SIGKILL)
                     except Exception:
                         pass
-                    # Explicitly close pipe handles to prevent descriptor leak / hang
                     if proc.stdout:
                         try:
                             proc.stdout.close()
@@ -187,12 +240,19 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
                     if not prompt:
                         return self._send_json({'error': 'Parameter "prompt" is required'}, status=400)
 
-                    cmd = [AGY_BIN, 'agentapi', 'new-conversation']
-                    if model:
-                        cmd.append(f'--model={model}')
-                    if title:
-                        cmd.append(f'--title={title}')
-                    cmd.append(prompt)
+                    # Choose execution strategy: agentapi IPC (if LS online) or standalone agy -p
+                    if ls_address:
+                        cmd = [AGY_BIN, 'agentapi', 'new-conversation']
+                        if model:
+                            cmd.append(f'--model={model}')
+                        if title:
+                            cmd.append(f'--title={title}')
+                        cmd.append(prompt)
+                    else:
+                        # Fallback: standalone print mode
+                        cmd = [AGY_BIN, '-p', prompt, '--dangerously-skip-permissions', '--output-format', 'json']
+                        if model:
+                            cmd.extend(['--model', model])
 
                     future = None
                     try:
@@ -202,6 +262,7 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
                             self._send_json({
                                 'status': 'success',
                                 'action': 'new-conversation',
+                                'mode': 'agentapi_ipc' if ls_address else 'standalone_cli',
                                 'output': res.stdout.strip()
                             })
                         else:
@@ -224,6 +285,9 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
 
                     if not recipient_id or not content:
                         return self._send_json({'error': 'Parameters "recipient_id" and "content" are required'}, status=400)
+
+                    if not ls_address:
+                        return self._send_json({'error': 'Cannot send message: Antigravity Language Server is offline'}, status=503)
 
                     cmd = [AGY_BIN, 'agentapi', 'send-message']
                     if title:
@@ -257,6 +321,9 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
                     conversation_id = payload.get('conversation_id', '')
                     if not conversation_id:
                         return self._send_json({'error': 'Parameter "conversation_id" is required'}, status=400)
+
+                    if not ls_address:
+                        return self._send_json({'error': 'Cannot fetch metadata: Antigravity Language Server is offline'}, status=503)
 
                     cmd = [AGY_BIN, 'agentapi', 'get-conversation-metadata', conversation_id]
                     future = None
@@ -339,7 +406,7 @@ def run_server():
     signal.signal(signal.SIGINT, sigterm_handler)
     
     print(f"[*] Custom Antigravity REST Bridge Server listening on http://127.0.0.1:{PORT}")
-    print(f"[*] Max HTTP Connections={MAX_HTTP_CONNECTIONS} (45 POST / 5 Reserved Health), Agent Semaphore={MAX_WORKERS}")
+    print(f"[*] Max HTTP Connections={MAX_HTTP_CONNECTIONS}, Socket Timeout={SOCKET_TIMEOUT}s")
     print(f"[*] Token auth: Strict Bearer from {TOKEN_FILE}")
 
     try:
