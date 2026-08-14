@@ -12,14 +12,16 @@ mkdir -p /workspace/scripts
 cp "$SCRIPT_DIR/acp_server.py" /workspace/scripts/acp_server.py
 cp "$SCRIPT_DIR/ensure_acp_bridge.sh" /workspace/scripts/ensure_acp_bridge.sh
 cp "$SCRIPT_DIR/acp_watchdog.sh" /workspace/scripts/acp_watchdog.sh
+cp "$SCRIPT_DIR/acp-cli" /workspace/scripts/acp-cli
 
 chmod +x /workspace/scripts/acp_server.py
 chmod +x /workspace/scripts/ensure_acp_bridge.sh
 chmod +x /workspace/scripts/acp_watchdog.sh
+chmod +x /workspace/scripts/acp-cli
 
-# 2. Install acp-cli globally
-cp "$SCRIPT_DIR/acp-cli" /usr/local/bin/acp-cli
-chmod +x /usr/local/bin/acp-cli
+# 2. Link the persistent CLI into the container PATH. The symlink can be
+# recreated after every container rebuild without reinstalling the bridge.
+ln -sf /workspace/scripts/acp-cli /usr/local/bin/acp-cli
 
 # 3. Create global symlinks for agy and agentapi if available
 if [ -f "/home/codex/.local/bin/agy" ]; then
