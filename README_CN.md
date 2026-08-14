@@ -3,55 +3,68 @@
 [English](./README.md) | **中文文档**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/Version-2.1.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/Version-2.3.0-blue.svg)]()
 [![Status](https://img.shields.io/badge/Status-Production--Ready-brightgreen.svg)]()
 
-工业级、高可靠且安全的 **REST API & IPC 控制桥接服务**，专为 **Google Antigravity (`agy`) / OpenAI Codex** Agent 进程间通信与自动化控制而设计。
+工业级、高可靠且安全的 **REST API & IPC 控制桥接服务**，专为 **Google Antigravity (`agy`) / OpenAI Codex** 显式 1:1 会话隔离与进程间通信而设计。
 
 ---
 
 ## 🌟 核心特性
 
+- 🎯 **显式 1:1 会话映射与无状态网关**：完全取消全局 `agy -c` 最近会话抢占机制。每个 Codex 会话显式对应独立的 Antigravity `conversation_id`，天然多会话隔离。
+- 🔒 **单会话并发互斥锁（Per-Conversation Lock）**：针对同一 `conversation_id` 的并发请求自动返回 `HTTP 409 Conflict` 保护，防止多轮状态机和 Transcript 污染。
+- 🛑 **全局有界准入控制（HTTP 429）**：通过可配置的 `AGY_MAX_CONCURRENCY`（默认 `1`，保护代理链路）限制全局执行并发，超额立即返回 `HTTP 429 Too Many Requests`。
+- ⏱️ **环境可配总超时预算**：支持服务端 `ACP_AGENT_TIMEOUT_SEC`（默认 `300秒`，单调递减传递给各次尝试）及客户端 `ACP_CLIENT_TIMEOUT_SEC`（默认 `330秒`），超时自动进行进程组全树清理（`os.killpg(pgid, signal.SIGKILL)`）。
+- 🔁 **前置异常智能重试**：仅对任务未启动阶段的 transient 错误（如 `EOF`、网络重置等 0-turn 字典错误）进行最多 3 次快速重试；一旦任务开始执行（已消耗 Token / 已输出响应 / 已分配 `conversation_id`），绝不重试并原样返回供客户端决策。
 - 🔐 **严格 Bearer Token 身份鉴权**：所有 POST API 操作均需通过 `Authorization: Bearer <TOKEN>` 认证（密钥文件采用 `0600` 属主独占权限）。
 - ⚡ **专属配额 /health 探针**：为 `/health` 和状态心跳留有 5 个独立连接配额（响应延迟低至 0.001 秒），与重型 Agent 执行队列彻底解耦，绝不因业务繁忙被误判卡死。
-- 🛑 **有界准入控制（HTTP 429 反压）**：当并发 Agent 任务达到 10 个上限时，自动通过非阻塞信号量拒绝超额任务并返回 `HTTP 429 Too Many Requests`，拒绝无界无限排队。
 - 🛡️ **慢连接与 Slowloris 防护**：配置了 Socket 单次 I/O 超时（10s）、请求体大小限制（2MB）以及 HTTP 总连接数上限（50 个 Socket）。
-- 🧹 **进程组树完整清理**：通过独立的 Process Group 进程组隔离（`start_new_session=True` + `os.killpg`），确保 Agent 命令超时后 100% 干净杀死子进程及其所有脱离后代。
-- 🔄 **消除死锁 SIGTERM 与自愈 Watchdog**：异步信号处理（避免 Python `BaseServer.shutdown()` 主线程死锁）+ `cancel_futures=True`（带有 65s 优雅退场缓冲区），结合脱离 TTY 终端的单例文件锁 Watchdog 持续监控自愈。
 
 ---
 
 ## 🏗️ 架构概览
 
 ```
-[ 外部客户端 / Codex CLI / 第三方 Agent ]
-                   │
-                   ▼
-      [ acp-cli / HTTP REST API ]
-                   │
-       (严格 Bearer Token 身份鉴权)
-                   │
-                   ▼
-  ┌─────────────────────────────────┐
-  │  Antigravity REST Bridge Server │  ── (监听端口 127.0.0.1:8765)
-  └─────────────────────────────────┘
-         │                   │
-  (快速 GET /health)    (重型 Agent 任务 POST)
-         │                   │
-         ▼                   ▼
-┌──────────────────┐ ┌──────────────────────────────┐
-│  专属快速响应线程  │ │ 有界 Agent 任务线程池 (上限10) │
-└──────────────────┘ └──────────────────────────────┘
-                             │
-                             ▼
-              ┌─────────────────────────────┐
-              │ `agy agentapi` 独立进程组   │
-              └─────────────────────────────┘
-                             ▲
-                             │
-         [ Watchdog 守护监视器 (PPID=1, TTY=?) ]
-           (单例排他文件锁 & 5s 周期心跳)
+[ Codex Session A ]        [ Codex Session B ]        [ 其他客户端 ]
+         │                          │                       │
+         ▼                          ▼                       ▼
+  (conversation_id: A)      (conversation_id: B)     (无 conversation_id: 新建)
+         │                          │                       │
+         └──────────────────────────┼───────────────────────┘
+                                    │
+                                    ▼ (严格 Bearer Token 鉴权)
+                    ┌─────────────────────────────────┐
+                    │  Antigravity REST Bridge Server │  ── (监听端口 127.0.0.1:8765)
+                    └─────────────────────────────────┘
+                           │                   │
+                    (快速 GET /health)    (重型 POST /invoke & /send-message)
+                           │                   │
+                           ▼                   ▼
+                  ┌──────────────────┐ ┌──────────────────────────────┐
+                  │  专属快速响应线程  │ │ 有界 Agent 任务池 (上限 N)    │
+                  └──────────────────┘ │ 单会话互斥锁 (HTTP 409 保护)  │
+                                       └──────────────────────────────┘
+                                                       │
+                                                       ▼
+                                        ┌─────────────────────────────┐
+                                        │ `agy --conversation <id>`   │
+                                        │ 独立进程组 (无全局 agy -c 抢占)│
+                                        └─────────────────────────────┘
+                                                       ▲
+                                                       │
+                                   [ Watchdog 守护监视器 (PPID=1, TTY=?) ]
+                                     (单例排他文件锁 & 5s 周期 /health 探测)
 ```
+
+---
+
+## 💡 会话生命周期与客户端职责规范
+
+1. **客户端持有 `conversation_id`**：Bridge 采用无状态网关设计。首轮交互调用 `POST /acp/v1/invoke`（不带 `conversation_id`），Bridge 在成功响应中返回生成的 `conversation_id`。Codex 客户端必须在会话状态中持久记录该 ID。
+2. **显式续接**：后续所有交互（`/invoke` 或 `/send-message`）必须显式传入 `conversation_id`。
+3. **跨重启自愈**：Antigravity 会将对话历史以 `conversation_id` 为键持久化在本地磁盘。即使 Bridge 服务或容器重启，Codex 客户端只要携带原 `conversation_id` 即可无缝续接历史上下文。
+4. **禁止同会话并发**：同一 Codex 会话严禁并发发送多个 Turn。若在上一轮生成结束前再次提交，Bridge 将立即返回 `HTTP 409 Conflict`。
 
 ---
 
@@ -64,13 +77,15 @@
 
 ### 命令行工具使用 (`acp-cli`)
 ```bash
-# 查看桥接服务与 Watchdog 运行状态
+# 查看桥接服务运行状态
 acp-cli status
 
-# 发起新 Agent 任务
+# 发起新 Agent 任务 (返回分配的 conversation_id)
 acp-cli invoke "请协助审查 /workspace/processor.py 中的代码逻辑"
 
-# 向指定对话发送交互消息
+# 显式续接已有会话 (推荐使用无歧义 --conversation 选项，同时兼容位置参数)
+acp-cli invoke --conversation <conversation_id> "继续修改测试用例"
+acp-cli invoke <conversation_id> "继续修改测试用例"
 acp-cli send <conversation_id> "确认，请继续执行"
 ```
 
@@ -84,14 +99,35 @@ acp-cli send <conversation_id> "确认，请继续执行"
 curl -s http://127.0.0.1:8765/health
 ```
 
-### 2. 触发 Agent 任务 (`POST /acp/v1/invoke`)
+### 2. 触发 / 继续 Agent 任务 (`POST /acp/v1/invoke`)
 需要 Bearer Token 鉴权。
+
+- **首次发起（新建会话）**：
 ```bash
 TOKEN=$(cat ~/.codex/acp_token)
 curl -s -X POST http://127.0.0.1:8765/acp/v1/invoke \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"prompt": "执行代码重构"}'
+```
+响应示例：
+```json
+{
+  "status": "success",
+  "action": "new-conversation",
+  "conversation_id": "f4a0fc45-3d6c-462a-ab20-038a5fd8a04b",
+  "mode": "explicit_conversation_cli",
+  "output": "..."
+}
+```
+
+- **后续交互（继续已有会话）**：
+```bash
+TOKEN=$(cat ~/.codex/acp_token)
+curl -s -X POST http://127.0.0.1:8765/acp/v1/invoke \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"conversation_id": "f4a0fc45-3d6c-462a-ab20-038a5fd8a04b", "prompt": "继续修改测试用例"}'
 ```
 
 ### 3. 推送对话消息 (`POST /acp/v1/send-message`)
@@ -101,7 +137,7 @@ TOKEN=$(cat ~/.codex/acp_token)
 curl -s -X POST http://127.0.0.1:8765/acp/v1/send-message \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"recipient_id": "YOUR_CONVERSATION_ID", "content": "继续执行下一阶段"}'
+  -d '{"recipient_id": "f4a0fc45-3d6c-462a-ab20-038a5fd8a04b", "content": "确认，继续执行下一阶段"}'
 ```
 
 ---
@@ -110,13 +146,14 @@ curl -s -X POST http://127.0.0.1:8765/acp/v1/send-message \
 
 | 指标 / 防线 | 配置值 / 策略 | 详细说明 |
 | :--- | :--- | :--- |
-| **最大并发 Agent 任务** | `10` | 采用 `BoundedSemaphore(10)` 进行门禁拦截 |
-| **任务超额策略** | `HTTP 429` | 超额非阻塞拒绝，立即返回 Too Many Requests |
+| **会话隔离模型** | 显式 `conversation_id` | 客户端持有 ID；完全取消全局 `agy -c` 抢占 |
+| **单会话并发保护** | `HTTP 409 Conflict` | 针对同一会话并发提交时实施锁保护，防止状态破坏 |
+| **全局并发任务上限** | `AGY_MAX_CONCURRENCY` (默认 `1`) | 采用非阻塞信号量门禁，超额返回 `HTTP 429` |
+| **服务端超时预算** | `ACP_AGENT_TIMEOUT_SEC` (默认 `300秒`) | 超时通过 `os.killpg(pgid, SIGKILL)` 清理整个进程组 |
+| **客户端超时限制** | `ACP_CLIENT_TIMEOUT_SEC` (默认 `330秒`) | 客户端 HTTP 超时参数 |
 | **最大总 HTTP 连接数** | `50` | `45 POST` + `5 Reserved /health` 配额隔离 |
 | **Socket 空闲超时** | `10.0 秒` | 超过 10 秒无读写自动断开 Socket 链接 |
-| **Agent 子进程超时** | `60.0 秒` | 通过 `os.killpg(pgid, SIGKILL)` 清理整个进程组 |
 | **最大请求体限制** | `2 MB` | 超过 2MB 直接拦截并返回 `HTTP 413` |
-| **SIGTERM 优雅等待窗口**| `65.0 秒` | 允许 60 秒存量运行任务优雅退场 |
 
 ---
 
