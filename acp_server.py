@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Custom Antigravity REST Bridge Server for Codex Integration (v2.2.0)
+Custom Antigravity REST Bridge Server for Codex Integration (v2.2.1)
 - Antigravity Language Server (LS) Auto-Discovery & Dynamic Injection (ANTIGRAVITY_LS_ADDRESS)
 - Deep Health Check (Language Server Connectivity Verification)
 - Standalone CLI Fallback (`agy -p`) when LS is offline
@@ -19,13 +19,17 @@ import sys
 import signal
 import socket
 import glob
+import re
 import shutil
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 PORT = int(os.environ.get("ACP_PORT", 8765))
 AGY_BIN = os.environ.get("AGY_BIN") or shutil.which("agy") or "/home/codex/.local/bin/agy"
 TOKEN_FILE = os.environ.get("ACP_TOKEN_FILE") or "/home/codex/.codex/acp_token"
+AGY_LOG_DIR = os.environ.get("AGY_LOG_DIR") or "/home/codex/.gemini/antigravity-cli/log"
+ACP_PROJECT_ID = os.environ.get("ACP_PROJECT_ID") or "default-cli-project"
 
 MAX_CONTENT_LENGTH = 2 * 1024 * 1024  # 2MB Limit
 SUBPROCESS_TIMEOUT = 60  # 60s timeout for agent subprocesses
@@ -59,6 +63,8 @@ post_connection_semaphore = threading.BoundedSemaphore(MAX_POST_CONNECTIONS)
 
 # Global ThreadPoolExecutor for heavy agent subprocesses
 agent_executor = ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="ACP_AgentWorker")
+ls_discovery_lock = threading.Lock()
+ls_discovery_cache = {"address": None, "expires_at": 0.0}
 
 def test_ls_connect(addr):
     """Test TCP socket connection to Language Server address"""
@@ -74,28 +80,108 @@ def test_ls_connect(addr):
     except Exception:
         return False
 
+def agy_owns_listening_port(port):
+    """Verify that a local TCP listening socket belongs to the managed `agy -c` process."""
+    target_inodes = set()
+    port_hex = f"{int(port):04X}"
+    for table_path in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(table_path, "r", encoding="ascii") as table:
+                next(table, None)
+                for line in table:
+                    fields = line.split()
+                    if len(fields) > 9 and fields[1].rsplit(":", 1)[-1].upper() == port_hex and fields[3] == "0A":
+                        target_inodes.add(fields[9])
+        except OSError:
+            pass
+    if not target_inodes:
+        return False
+
+    socket_links = {f"socket:[{inode}]" for inode in target_inodes}
+    for proc_dir in glob.glob("/proc/[0-9]*"):
+        try:
+            exe_name = os.path.basename(os.readlink(os.path.join(proc_dir, "exe")))
+            if exe_name != "agy":
+                continue
+            with open(os.path.join(proc_dir, "cmdline"), "rb") as cmdline_file:
+                args = [arg.decode("utf-8", errors="ignore") for arg in cmdline_file.read().split(b"\0") if arg]
+            if len(args) < 2 or args[1] != "-c":
+                continue
+            for fd_path in glob.glob(os.path.join(proc_dir, "fd", "*")):
+                try:
+                    if os.readlink(fd_path) in socket_links:
+                        return True
+                except OSError:
+                    pass
+        except OSError:
+            pass
+    return False
+
+def valid_ls_candidate(addr):
+    """Accept only a reachable local listener owned by the managed agy process."""
+    try:
+        host, port = addr.rsplit(":", 1)
+        return host in ("localhost", "127.0.0.1") and test_ls_connect(addr) and agy_owns_listening_port(int(port))
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+def read_log_tail(path, max_bytes=65536):
+    """Read only the tail of an agy log to bound health-check disk I/O."""
+    with open(path, "rb") as log_file:
+        log_file.seek(0, os.SEEK_END)
+        size = log_file.tell()
+        log_file.seek(max(0, size - max_bytes), os.SEEK_SET)
+        return log_file.read().decode("utf-8", errors="ignore")
+
 def discover_ls_address():
     """
     Auto-discover live Antigravity Language Server address.
-    Checks environment variable, then inspects active process environments in /proc/*/environ.
+    Checks environment variables/process environments first, then parses recent agy logs.
+    agy 1.1.13 starts the HTTP Language Server on a random local port but does not
+    export ANTIGRAVITY_LS_ADDRESS in its own process environment.
     """
-    env_addr = os.environ.get("ANTIGRAVITY_LS_ADDRESS")
-    if env_addr and test_ls_connect(env_addr):
-        return env_addr
+    with ls_discovery_lock:
+        cached_addr = ls_discovery_cache["address"]
+        if time.monotonic() < ls_discovery_cache["expires_at"] and valid_ls_candidate(cached_addr):
+            return cached_addr
 
-    for p in glob.glob("/proc/[0-9]*/environ"):
-        try:
-            with open(p, "rb") as f:
-                content = f.read().decode("utf-8", errors="ignore")
-                if "ANTIGRAVITY_LS_ADDRESS=" in content:
-                    for item in content.split("\0"):
-                        if item.startswith("ANTIGRAVITY_LS_ADDRESS="):
-                            candidate = item.split("=", 1)[1].strip()
-                            if candidate and test_ls_connect(candidate):
-                                return candidate
-        except Exception:
-            pass
-    return None
+        env_addr = os.environ.get("ANTIGRAVITY_LS_ADDRESS")
+        if env_addr and valid_ls_candidate(env_addr):
+            ls_discovery_cache.update(address=env_addr, expires_at=time.monotonic() + 3.0)
+            return env_addr
+
+        for p in glob.glob("/proc/[0-9]*/environ"):
+            try:
+                with open(p, "rb") as f:
+                    content = f.read().decode("utf-8", errors="ignore")
+                    if "ANTIGRAVITY_LS_ADDRESS=" in content:
+                        for item in content.split("\0"):
+                            if item.startswith("ANTIGRAVITY_LS_ADDRESS="):
+                                candidate = item.split("=", 1)[1].strip()
+                                if candidate and valid_ls_candidate(candidate):
+                                    ls_discovery_cache.update(address=candidate, expires_at=time.monotonic() + 3.0)
+                                    return candidate
+            except Exception:
+                pass
+
+        # Prefer the newest logs and require the listener to belong to `agy -c`.
+        log_paths = glob.glob(os.path.join(AGY_LOG_DIR, "cli-*.log"))
+        log_paths.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+        port_pattern = re.compile(r"Language server listening on random port at (\d+) for HTTP\b")
+        for path in log_paths[:20]:
+            try:
+                for line in reversed(read_log_tail(path).splitlines()):
+                    match = port_pattern.search(line)
+                    if match:
+                        port = int(match.group(1))
+                        candidate = f"localhost:{port}"
+                        if valid_ls_candidate(candidate):
+                            ls_discovery_cache.update(address=candidate, expires_at=time.monotonic() + 3.0)
+                            return candidate
+            except (OSError, ValueError):
+                pass
+        ls_discovery_cache.update(address=None, expires_at=time.monotonic() + 1.0)
+        return None
 
 class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
     def _send_json(self, data, status=200):
@@ -128,7 +214,7 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
             self._send_json({
                 'status': 'online',
                 'service': 'Antigravity REST Bridge Server',
-                'version': '2.2.0',
+                'version': '2.2.1',
                 'auth_type': 'Strict Bearer Token',
                 'language_server': {
                     'status': 'connected' if ls_connected else 'offline',
@@ -187,6 +273,8 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
             env = os.environ.copy()
             if ls_address:
                 env["ANTIGRAVITY_LS_ADDRESS"] = ls_address
+                # Required by agy 1.1.13 when agentapi includes workspace environment data.
+                env.setdefault("ANTIGRAVITY_PROJECT_ID", ACP_PROJECT_ID)
 
             # Helper for process-group execution with LS environment injection
             def run_agent_command(cmd, timeout_sec):
