@@ -3,7 +3,7 @@
 [English](./README.md) | **中文文档**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/Version-2.3.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/Version-2.4.0-blue.svg)]()
 [![Status](https://img.shields.io/badge/Status-Production--Ready-brightgreen.svg)]()
 
 工业级、高可靠且安全的 **REST API & IPC 控制桥接服务**，专为 **Google Antigravity (`agy`) / OpenAI Codex** 显式 1:1 会话隔离与进程间通信而设计。
@@ -15,8 +15,9 @@
 - 🎯 **显式 1:1 会话映射与无状态网关**：完全取消全局 `agy -c` 最近会话抢占机制。每个 Codex 会话显式对应独立的 Antigravity `conversation_id`，天然多会话隔离。
 - 🔒 **单会话并发互斥锁（Per-Conversation Lock）**：针对同一 `conversation_id` 的并发请求自动返回 `HTTP 409 Conflict` 保护，防止多轮状态机和 Transcript 污染。
 - 🛑 **全局有界准入控制（HTTP 429）**：通过可配置的 `AGY_MAX_CONCURRENCY`（默认 `1`，保护代理链路）限制全局执行并发，超额立即返回 `HTTP 429 Too Many Requests`。
-- ⏱️ **环境可配总超时预算**：支持服务端 `ACP_AGENT_TIMEOUT_SEC`（默认 `300秒`，单调递减传递给各次尝试）及客户端 `ACP_CLIENT_TIMEOUT_SEC`（默认 `330秒`），超时自动进行进程组全树清理（`os.killpg(pgid, signal.SIGKILL)`）。
+- ⏱️ **环境可配超时预算**：`ACP_AGENT_TIMEOUT_SEC`（默认 `300秒`）作为任务基础预算，另将 `ACP_AUTH_GRACE_SEC`（默认 `30秒`）加入进程期限以覆盖自动登录和前置初始化；默认进程总期限为 `330秒`，客户端超时为 `360秒`，超时仍会清理整个进程组。
 - 🔁 **前置异常智能重试**：仅对任务未启动阶段的 transient 错误（如 `EOF`、网络重置等 0-turn 字典错误）进行最多 3 次快速重试；一旦任务开始执行（已消耗 Token / 已输出响应 / 已分配 `conversation_id`），绝不重试并原样返回供客户端决策。
+- 🟡 **部分成功保留**：若 agy 已返回非空回复却把终态标为 `ERROR`，Bridge 返回 HTTP 200 和 `status: partial_success`，同时保留回复、原始错误及 CLI 退出码；没有回复的真实失败仍返回 HTTP 500。
 - 🔐 **严格 Bearer Token 身份鉴权**：所有 POST API 操作均需通过 `Authorization: Bearer <TOKEN>` 认证（密钥文件采用 `0600` 属主独占权限）。
 - ⚡ **专属配额 /health 探针**：为 `/health` 和状态心跳留有 5 个独立连接配额（响应延迟低至 0.001 秒），与重型 Agent 执行队列彻底解耦，绝不因业务繁忙被误判卡死。
 - 🛡️ **慢连接与 Slowloris 防护**：配置了 Socket 单次 I/O 超时（10s）、请求体大小限制（2MB）以及 HTTP 总连接数上限（50 个 Socket）。
@@ -121,6 +122,19 @@ curl -s -X POST http://127.0.0.1:8765/acp/v1/invoke \
 }
 ```
 
+如果 agy 已生成可用回复，但 print mode 在结束阶段报告错误，Bridge 会同时保留两种事实：
+```json
+{
+  "status": "partial_success",
+  "conversation_id": "f4a0fc45-3d6c-9528-cdde2afcfa35",
+  "warning": "agy reported ERROR after producing a non-empty response; review the response before relying on it",
+  "upstream_status": "ERROR",
+  "upstream_error": "Agent execution terminated due to error.",
+  "cli_exit_code": 1,
+  "parsed": {"response": "..."}
+}
+```
+
 - **后续交互（继续已有会话）**：
 ```bash
 TOKEN=$(cat ~/.codex/acp_token)
@@ -149,8 +163,9 @@ curl -s -X POST http://127.0.0.1:8765/acp/v1/send-message \
 | **会话隔离模型** | 显式 `conversation_id` | 客户端持有 ID；完全取消全局 `agy -c` 抢占 |
 | **单会话并发保护** | `HTTP 409 Conflict` | 针对同一会话并发提交时实施锁保护，防止状态破坏 |
 | **全局并发任务上限** | `AGY_MAX_CONCURRENCY` (默认 `1`) | 采用非阻塞信号量门禁，超额返回 `HTTP 429` |
-| **服务端超时预算** | `ACP_AGENT_TIMEOUT_SEC` (默认 `300秒`) | 超时通过 `os.killpg(pgid, SIGKILL)` 清理整个进程组 |
-| **客户端超时限制** | `ACP_CLIENT_TIMEOUT_SEC` (默认 `330秒`) | 客户端 HTTP 超时参数 |
+| **任务执行预算** | `ACP_AGENT_TIMEOUT_SEC` (默认 `300秒`) | 任务基础预算；组合期限到期后通过 `os.killpg(pgid, SIGKILL)` 清理进程组 |
+| **自动登录宽限** | `ACP_AUTH_GRACE_SEC` (默认 `30秒`) | 为静默登录与前置初始化额外加入一次进程期限 |
+| **客户端超时限制** | `ACP_CLIENT_TIMEOUT_SEC` (默认 `360秒`) | 默认等于任务预算 + 登录宽限 + 30 秒传输余量 |
 | **最大总 HTTP 连接数** | `50` | `45 POST` + `5 Reserved /health` 配额隔离 |
 | **Socket 空闲超时** | `10.0 秒` | 超过 10 秒无读写自动断开 Socket 链接 |
 | **最大请求体限制** | `2 MB` | 超过 2MB 直接拦截并返回 `HTTP 413` |

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Production-grade Daemon Launcher for ACP REST Bridge Server (v2.2.1)
+# Production-grade Daemon Launcher for ACP REST Bridge Server (v2.4.0)
 # Featuring Setsid Detachment (-f), Atomic Locking, Strict PID & Executable Verification,
 # Lock FD Isolation (200>&- 201>&-), Deadlock-Free SIGTERM Graceful Shutdown with 65s Buffer,
 # and Killing Unhealthy NEW_PID with Exit 1 on Readiness Failure.

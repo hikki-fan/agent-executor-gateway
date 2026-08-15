@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
-Custom Antigravity REST Bridge Server for Codex Integration (v2.3.0)
+Custom Antigravity REST Bridge Server for Codex Integration (v2.4.0)
 - Explicit 1:1 Codex Session to Antigravity Conversation Mapping
 - Stateless Gateway (No session pseudo-mapping, client holds conversation_id)
 - Decoupled from global agy -c loop & Language Server (Zero session preemption/hijacking)
 - Per-Conversation Concurrency Locking (HTTP 409 Conflict Protection)
 - Global Concurrency Semaphore (AGY_MAX_CONCURRENCY, default 1, HTTP 429)
-- Configurable Total Agent Timeout Budget (ACP_AGENT_TIMEOUT_SEC, default 300s)
+- Configurable Task Timeout Budget (ACP_AGENT_TIMEOUT_SEC, default 300s)
 - Monotonic Deadline Enforcement across subprocesses & retry attempts
 - Reliable CLI Flag Ordering (all options precede -p <prompt>)
 - Strict JSON Object & Status Verification for CLI output
 - Output JSON Parsing with Pre-execution Error Retry (EOF/network <= 3 times on new 0-turn dict only)
 - In-flight Error Preservation (No retry once turns/tokens/response/conversation_id started or if resuming)
 - Explicit Pipe Closure (stdin=DEVNULL) & Process Group Tree Cleanup (os.setsid + os.killpg)
+- Separate Automatic Login Grace Budget (ACP_AUTH_GRACE_SEC, default 30s)
+- Partial-success Preservation when agy emits a response but reports ERROR
 - Reserved Health Capacity (45 POST / 5 Reserved Health) & Socket Timeout (10s)
 """
 
@@ -36,7 +38,9 @@ AGY_BIN = os.environ.get("AGY_BIN") or shutil.which("agy") or "/home/codex/.loca
 TOKEN_FILE = os.environ.get("ACP_TOKEN_FILE") or "/home/codex/.codex/acp_token"
 
 MAX_CONTENT_LENGTH = 2 * 1024 * 1024  # 2MB Limit
-SUBPROCESS_TIMEOUT = int(os.environ.get("ACP_AGENT_TIMEOUT_SEC", 300))  # Default 300s total timeout budget
+SUBPROCESS_TIMEOUT = int(os.environ.get("ACP_AGENT_TIMEOUT_SEC", 300))  # Default 300s task budget
+AUTH_GRACE_SEC = max(0, int(os.environ.get("ACP_AUTH_GRACE_SEC", 30)))  # Silent-login/preflight allowance
+TOTAL_PROCESS_TIMEOUT = SUBPROCESS_TIMEOUT + AUTH_GRACE_SEC
 AGY_MAX_CONCURRENCY = int(os.environ.get("AGY_MAX_CONCURRENCY", 1))  # Default 1 concurrent task
 MAX_HTTP_CONNECTIONS = 50  # Maximum 50 total HTTP connections
 MAX_POST_CONNECTIONS = 45  # Reserved 5 connection slots strictly for /health
@@ -256,6 +260,37 @@ def execute_with_retry(cmd, total_timeout_sec, max_retries=3):
 
     return last_res, last_parsed
 
+def has_cli_response(parsed_json):
+    """Return True when agy preserved a non-empty assistant response."""
+    if not isinstance(parsed_json, dict):
+        return False
+    response = parsed_json.get("response")
+    return response is not None and bool(str(response).strip())
+
+def is_partial_success_result(parsed_json):
+    """
+    Recognize agy print-mode's contradictory terminal result: an ERROR status
+    accompanied by a usable assistant response. This is intentionally distinct
+    from success so callers can review the upstream warning without losing work.
+    """
+    return (
+        isinstance(parsed_json, dict)
+        and parsed_json.get("status") == "ERROR"
+        and has_cli_response(parsed_json)
+    )
+
+def cli_error_detail(proc_result, parsed_json, stderr_text):
+    """Build a stable diagnostic while preserving agy's upstream error."""
+    if isinstance(parsed_json, dict) and parsed_json.get("error"):
+        return str(parsed_json.get("error"))
+    if stderr_text:
+        return stderr_text
+    if not isinstance(parsed_json, dict):
+        return "CLI output is not a valid JSON object"
+    if parsed_json.get("status") != "SUCCESS":
+        return f"CLI returned status: {parsed_json.get('status')}"
+    return f"CLI process exited with code {proc_result.returncode}"
+
 class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
     def _send_json(self, data, status=200):
         try:
@@ -285,7 +320,7 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
             self._send_json({
                 'status': 'online',
                 'service': 'Antigravity REST Bridge Server',
-                'version': '2.3.0',
+                'version': '2.4.0',
                 'auth_type': 'Strict Bearer Token',
                 'mode': 'explicit_conversation_cli',
                 'language_server': {
@@ -296,6 +331,8 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
                 'limits': {
                     'max_payload_bytes': MAX_CONTENT_LENGTH,
                     'subprocess_timeout_sec': SUBPROCESS_TIMEOUT,
+                    'auth_grace_sec': AUTH_GRACE_SEC,
+                    'total_process_timeout_sec': TOTAL_PROCESS_TIMEOUT,
                     'max_worker_threads': AGY_MAX_CONCURRENCY,
                     'max_http_connections': MAX_HTTP_CONNECTIONS,
                     'max_post_connections': MAX_POST_CONNECTIONS,
@@ -375,8 +412,8 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
                     cmd = build_agy_command(prompt, conversation_id=conversation_id if conversation_id else None, model=model, effort=effort)
                     future = None
                     try:
-                        future = agent_executor.submit(execute_with_retry, cmd, SUBPROCESS_TIMEOUT, 3)
-                        res, parsed = future.result(timeout=SUBPROCESS_TIMEOUT + 5)
+                        future = agent_executor.submit(execute_with_retry, cmd, TOTAL_PROCESS_TIMEOUT, 3)
+                        res, parsed = future.result(timeout=TOTAL_PROCESS_TIMEOUT + 5)
 
                         out_text = res.stdout.strip() if res.stdout else ""
                         err_text = res.stderr.strip() if res.stderr else ""
@@ -403,6 +440,13 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
                                     out_cid = None
                                     is_valid_success = False
 
+                        is_partial_success = is_partial_success_result(parsed)
+                        partial_cid = conversation_id or (
+                            str(parsed.get("conversation_id")).strip()
+                            if isinstance(parsed, dict) and parsed.get("conversation_id")
+                            else None
+                        )
+
                         if is_valid_success:
                             self._send_json({
                                 'status': 'success',
@@ -412,20 +456,28 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
                                 'output': out_text,
                                 'parsed': parsed
                             })
+                        elif is_partial_success and partial_cid:
+                            upstream_error = cli_error_detail(res, parsed, err_text)
+                            self._send_json({
+                                'status': 'partial_success',
+                                'action': 'invoke' if conversation_id else 'new-conversation',
+                                'conversation_id': str(partial_cid),
+                                'mode': 'explicit_conversation_cli',
+                                'warning': 'agy reported ERROR after producing a non-empty response; review the response before relying on it',
+                                'upstream_status': parsed.get('status'),
+                                'upstream_error': upstream_error,
+                                'cli_exit_code': res.returncode,
+                                'output': out_text,
+                                'parsed': parsed
+                            })
                         else:
                             error_detail = ""
                             if isinstance(parsed, dict) and parsed.get("status") == "SUCCESS" and not conversation_id and not parsed.get("conversation_id"):
                                 error_detail = "CLI returned status: SUCCESS but missing required top-level 'conversation_id' field in JSON"
-                            elif isinstance(parsed, dict) and parsed.get("error"):
-                                error_detail = str(parsed.get("error"))
-                            elif err_text:
-                                error_detail = err_text
-                            elif not isinstance(parsed, dict):
-                                error_detail = "CLI output is not a valid JSON object"
-                            elif parsed.get("status") != "SUCCESS":
-                                error_detail = f"CLI returned status: {parsed.get('status')}"
+                            elif is_partial_success and not partial_cid:
+                                error_detail = "CLI returned a response with status ERROR but no conversation_id was available"
                             else:
-                                error_detail = f"CLI process exited with code {res.returncode}"
+                                error_detail = cli_error_detail(res, parsed, err_text)
 
                             self._send_json({
                                 'status': 'error',
@@ -441,7 +493,7 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
                             future.cancel()
                         self._send_json({
                             'status': 'error',
-                            'error': f'Agent Execution Timed Out after total budget of {SUBPROCESS_TIMEOUT}s',
+                            'error': f'Agent Execution Timed Out after {SUBPROCESS_TIMEOUT}s task budget plus {AUTH_GRACE_SEC}s auth grace',
                             'conversation_id': conversation_id if conversation_id else None,
                             'status_code': 504
                         }, status=504)
@@ -490,8 +542,8 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
                     cmd = build_agy_command(content, conversation_id=recipient_id, model=model, effort=effort)
                     future = None
                     try:
-                        future = agent_executor.submit(execute_with_retry, cmd, SUBPROCESS_TIMEOUT, 3)
-                        res, parsed = future.result(timeout=SUBPROCESS_TIMEOUT + 5)
+                        future = agent_executor.submit(execute_with_retry, cmd, TOTAL_PROCESS_TIMEOUT, 3)
+                        res, parsed = future.result(timeout=TOTAL_PROCESS_TIMEOUT + 5)
 
                         out_text = res.stdout.strip() if res.stdout else ""
                         err_text = res.stderr.strip() if res.stderr else ""
@@ -511,18 +563,22 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
                                 'output': out_text,
                                 'parsed': parsed
                             })
+                        elif is_partial_success_result(parsed):
+                            upstream_error = cli_error_detail(res, parsed, err_text)
+                            self._send_json({
+                                'status': 'partial_success',
+                                'action': 'send-message',
+                                'conversation_id': recipient_id,
+                                'mode': 'explicit_conversation_cli',
+                                'warning': 'agy reported ERROR after producing a non-empty response; review the response before relying on it',
+                                'upstream_status': parsed.get('status'),
+                                'upstream_error': upstream_error,
+                                'cli_exit_code': res.returncode,
+                                'output': out_text,
+                                'parsed': parsed
+                            })
                         else:
-                            error_detail = ""
-                            if isinstance(parsed, dict) and parsed.get("error"):
-                                error_detail = str(parsed.get("error"))
-                            elif err_text:
-                                error_detail = err_text
-                            elif not isinstance(parsed, dict):
-                                error_detail = "CLI output is not a valid JSON object"
-                            elif parsed.get("status") != "SUCCESS":
-                                error_detail = f"CLI returned status: {parsed.get('status')}"
-                            else:
-                                error_detail = f"CLI process exited with code {res.returncode}"
+                            error_detail = cli_error_detail(res, parsed, err_text)
 
                             self._send_json({
                                 'status': 'error',
@@ -538,7 +594,7 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
                             future.cancel()
                         self._send_json({
                             'status': 'error',
-                            'error': f'Agent Message Timed Out after total budget of {SUBPROCESS_TIMEOUT}s',
+                            'error': f'Agent Message Timed Out after {SUBPROCESS_TIMEOUT}s task budget plus {AUTH_GRACE_SEC}s auth grace',
                             'conversation_id': recipient_id,
                             'status_code': 504
                         }, status=504)
@@ -620,7 +676,10 @@ def run_server():
     signal.signal(signal.SIGINT, sigterm_handler)
 
     print(f"[*] Custom Antigravity REST Bridge Server listening on http://127.0.0.1:{PORT}")
-    print(f"[*] Mode=explicit_conversation_cli, AGY_MAX_CONCURRENCY={AGY_MAX_CONCURRENCY}, TimeoutBudget={SUBPROCESS_TIMEOUT}s")
+    print(
+        f"[*] Mode=explicit_conversation_cli, AGY_MAX_CONCURRENCY={AGY_MAX_CONCURRENCY}, "
+        f"TaskBudget={SUBPROCESS_TIMEOUT}s, AuthGrace={AUTH_GRACE_SEC}s"
+    )
     print(f"[*] Max HTTP Connections={MAX_HTTP_CONNECTIONS}, Socket Timeout={SOCKET_TIMEOUT}s")
     print(f"[*] Token auth: Strict Bearer from {TOKEN_FILE}")
 

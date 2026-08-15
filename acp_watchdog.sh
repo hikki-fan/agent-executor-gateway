@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Continuous Background Supervisor / Watchdog for ACP REST Bridge (v2.3.0)
+# Continuous Background Supervisor / Watchdog for ACP REST Bridge (v2.4.0)
 # Featuring Singleton File Lock, TTY FD Cleanup, and Auto-Recovery for Bridge Service.
 
 LOCK_FILE="/home/codex/.codex/acp_watchdog.lock"

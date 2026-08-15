@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Comprehensive HTTP-level & Unit Test Suite for ACP REST Bridge (v2.3.0)
+Comprehensive HTTP-level & Unit Test Suite for ACP REST Bridge (v2.4.0)
 Tests:
 - Token isolation (temporary token file without reading real secrets)
 - Real HTTP server POST /invoke (new conversation with extracted ID)
@@ -13,6 +13,8 @@ Tests:
 - Existing conversation_id in error JSON (NO retry)
 - Invalid JSON output handling (NO retry, diagnostic HTTP 500)
 - Response text containing UUID but missing top-level conversation_id (strictly rejected with HTTP 500)
+- ERROR with a non-empty response preserved as HTTP 200 partial_success
+- Separate automatic-login grace included in server and client timeout budgets
 - Monotonic timeout budget deadline enforcement & process group cleanup
 - CLI argument parsing (parse_invoke_args for --conversation, --conversation=, positional uuid, and prompt)
 - Codebase & startup script audit (zero agy -c commands)
@@ -352,7 +354,120 @@ class TestACPBridgeHTTPAndUnit(unittest.TestCase):
             self.assertEqual(resp.get('status'), 'error')
             self.assertIn("missing required top-level 'conversation_id' field", resp.get('error', ''))
 
-    def test_11_monotonic_timeout_deadline_and_cleanup(self):
+    def test_11_invoke_error_with_response_is_partial_success(self):
+        """Preserve a resumed turn when agy reports ERROR after producing a response."""
+        cid = "44444444-5555-6666-7777-888888888888"
+        mock_output = {
+            "conversation_id": cid,
+            "status": "ERROR",
+            "error": "Agent execution terminated due to error.",
+            "response": "Review completed: all tests passed.",
+            "num_turns": 4,
+            "usage": {"total_tokens": 800},
+        }
+        mock_res = subprocess.CompletedProcess(
+            args=['agy'], returncode=1, stdout=json.dumps(mock_output), stderr=''
+        )
+
+        with patch('acp_server.run_agent_command', return_value=mock_res):
+            code, resp = self._http_request('/acp/v1/invoke', {
+                'conversation_id': cid,
+                'prompt': 'Review the implementation',
+            })
+
+        self.assertEqual(code, 200)
+        self.assertEqual(resp.get('status'), 'partial_success')
+        self.assertEqual(resp.get('conversation_id'), cid)
+        self.assertEqual(resp.get('upstream_status'), 'ERROR')
+        self.assertEqual(resp.get('cli_exit_code'), 1)
+        self.assertIn('terminated', resp.get('upstream_error', ''))
+        self.assertEqual(resp.get('parsed', {}).get('response'), mock_output['response'])
+
+    def test_12_new_conversation_error_with_response_requires_conversation_id(self):
+        """A partial first turn without a conversation ID cannot satisfy 1:1 mapping."""
+        mock_output = {
+            "status": "ERROR",
+            "error": "Agent execution terminated due to error.",
+            "response": "Some useful output",
+            "num_turns": 1,
+        }
+        mock_res = subprocess.CompletedProcess(
+            args=['agy'], returncode=1, stdout=json.dumps(mock_output), stderr=''
+        )
+
+        with patch('acp_server.run_agent_command', return_value=mock_res):
+            code, resp = self._http_request('/acp/v1/invoke', {'prompt': 'Start work'})
+
+        self.assertEqual(code, 500)
+        self.assertEqual(resp.get('status'), 'error')
+        self.assertIn('no conversation_id', resp.get('error', ''))
+
+    def test_13_send_message_error_with_response_is_partial_success(self):
+        """The send-message alias applies the same partial-success contract."""
+        cid = "55555555-6666-7777-8888-999999999999"
+        mock_output = {
+            "conversation_id": cid,
+            "status": "ERROR",
+            "error": "late print-mode shutdown error",
+            "response": "The requested work is complete.",
+        }
+        mock_res = subprocess.CompletedProcess(
+            args=['agy'], returncode=2, stdout=json.dumps(mock_output), stderr=''
+        )
+
+        with patch('acp_server.run_agent_command', return_value=mock_res):
+            code, resp = self._http_request('/acp/v1/send-message', {
+                'recipient_id': cid,
+                'content': 'Continue',
+            })
+
+        self.assertEqual(code, 200)
+        self.assertEqual(resp.get('status'), 'partial_success')
+        self.assertEqual(resp.get('action'), 'send-message')
+        self.assertEqual(resp.get('cli_exit_code'), 2)
+
+    def test_14_error_without_response_remains_http_500(self):
+        """Do not soften genuine failures that produced no assistant response."""
+        cid = "66666666-7777-8888-9999-000000000000"
+        mock_output = {
+            "conversation_id": cid,
+            "status": "ERROR",
+            "error": "User location is not supported",
+            "response": "",
+            "num_turns": 0,
+            "usage": {"total_tokens": 0},
+        }
+        mock_res = subprocess.CompletedProcess(
+            args=['agy'], returncode=1, stdout=json.dumps(mock_output), stderr=''
+        )
+
+        with patch('acp_server.run_agent_command', return_value=mock_res):
+            code, resp = self._http_request('/acp/v1/invoke', {
+                'conversation_id': cid,
+                'prompt': 'Continue',
+            })
+
+        self.assertEqual(code, 500)
+        self.assertEqual(resp.get('status'), 'error')
+        self.assertIn('location', resp.get('error', ''))
+
+    def test_15_health_reports_auth_grace_and_total_process_timeout(self):
+        code, resp = self._http_request('/health')
+
+        self.assertEqual(code, 200)
+        self.assertEqual(resp.get('version'), '2.4.0')
+        limits = resp.get('limits', {})
+        self.assertEqual(limits.get('auth_grace_sec'), acp_server.AUTH_GRACE_SEC)
+        self.assertEqual(
+            limits.get('total_process_timeout_sec'),
+            acp_server.SUBPROCESS_TIMEOUT + acp_server.AUTH_GRACE_SEC,
+        )
+        self.assertEqual(
+            acp_cli.CLIENT_TIMEOUT,
+            acp_server.SUBPROCESS_TIMEOUT + acp_server.AUTH_GRACE_SEC + 30,
+        )
+
+    def test_16_monotonic_timeout_deadline_and_cleanup(self):
         """Test total timeout budget raises TimeoutExpired and calls os.killpg"""
         def timeout_run(cmd, timeout):
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
@@ -361,7 +476,7 @@ class TestACPBridgeHTTPAndUnit(unittest.TestCase):
             with self.assertRaises(subprocess.TimeoutExpired):
                 acp_server.execute_with_retry(['agy', '-p', 'timeout test'], total_timeout_sec=2, max_retries=3)
 
-    def test_12_acp_cli_argument_parsing(self):
+    def test_17_acp_cli_argument_parsing(self):
         """Test acp-cli argument parsing for explicit --conversation, -c, and positional UUID without contacting network"""
         test_uuid = "abcdef12-3456-7890-abcd-ef1234567890"
 
@@ -390,7 +505,7 @@ class TestACPBridgeHTTPAndUnit(unittest.TestCase):
         self.assertIsNone(cid5)
         self.assertEqual(prompt5, 'Write a module')
 
-    def test_13_codebase_audit_no_agy_c_command(self):
+    def test_18_codebase_audit_no_agy_c_command(self):
         """Audit codebase and startup scripts to verify zero active running commands contain agy -c"""
         files_to_check = [
             '/workspace/antigravity-rest-bridge/acp_server.py',

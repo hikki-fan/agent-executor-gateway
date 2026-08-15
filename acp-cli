@@ -12,7 +12,12 @@ import urllib.error
 
 TOKEN_FILE = os.environ.get("ACP_TOKEN_FILE") or "/home/codex/.codex/acp_token"
 SERVER_URL = os.environ.get("ACP_SERVER_URL", "http://127.0.0.1:8765")
-CLIENT_TIMEOUT = int(os.environ.get("ACP_CLIENT_TIMEOUT_SEC", int(os.environ.get("ACP_AGENT_TIMEOUT_SEC", 300)) + 30))
+CLIENT_TIMEOUT = int(os.environ.get(
+    "ACP_CLIENT_TIMEOUT_SEC",
+    int(os.environ.get("ACP_AGENT_TIMEOUT_SEC", 300))
+    + max(0, int(os.environ.get("ACP_AUTH_GRACE_SEC", 30)))
+    + 30,
+))
 
 def get_token():
     if os.path.exists(TOKEN_FILE):
