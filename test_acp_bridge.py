@@ -507,11 +507,13 @@ class TestACPBridgeHTTPAndUnit(unittest.TestCase):
 
     def test_18_codebase_audit_no_agy_c_command(self):
         """Audit codebase and startup scripts to verify zero active running commands contain agy -c"""
+        repo_dir = os.path.dirname(os.path.abspath(__file__))
         files_to_check = [
-            '/workspace/antigravity-rest-bridge/acp_server.py',
-            '/workspace/antigravity-rest-bridge/acp_watchdog.sh',
-            '/workspace/docker-codex/docker/start-codex-container.sh',
-            '/workspace/antigravity-rest-bridge/install.sh'
+            os.path.join(repo_dir, 'acp_server.py'),
+            os.path.join(repo_dir, 'acp_watchdog.sh'),
+            os.path.join(repo_dir, 'ensure_acp_bridge.sh'),
+            os.path.join(repo_dir, 'install.sh'),
+            os.path.join(repo_dir, 'acp-cli'),
         ]
 
         for file_path in files_to_check:
