@@ -4,17 +4,22 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/Version-2.4.0-blue.svg)]()
-[![Status](https://img.shields.io/badge/Status-Phase%205%20Candidate-green.svg)]()
+[![Status](https://img.shields.io/badge/Status-Phase%206%20Candidate-green.svg)]()
 
 高可靠、Executor 中立的 **Agent Executor Gateway**，为 AI 编码 Agent 提供统一 REST API 编排、会话状态隔离与进程生命周期管控。
 
 > [!NOTE]
-> **Phase 5 说明**：当前已完整支持 Generic Executor API，并同时注册 Google Antigravity (`agy`) 与 Grok Build (`grok`) 执行器；全局及执行器级并发控制已在测试契约下生效。任务验证、路由和生产迁移属于后续阶段。
+> **Phase 6 说明**：当前已完整实现任务模型校验 (`orchestration/task.py`)、机器验证流水线 (`orchestration/verifier.py`)、Git 范围控制 (`orchestration/scope.py`)、完成报告与指标追加 (`orchestration/report.py`) 以及 `agentctl` 命令行工具 (`task validate`, `task verify`)。任务路由与升级 (Phase 7) 和生产迁移属于后续阶段。
 
 ---
 
 ## 🌟 核心特性
 
+- 📋 **统一任务模型与校验 (Phase 6)**：实现 Executor 中立的 Task JSON 规范 (`orchestration/task.py`)，校验目标、分类 (S/M/L/XL 复杂度、风险等级、任务类型)、执行策略、变更范围、验收标准与验证命令。
+- 🧪 **安全机器验证流水线 (Phase 6)**：安全命令执行器 (`orchestration/verifier.py`)，采用 `shell=False` 解析、`cwd` 严格隔离、进程组超时强杀 (`os.killpg`)、敏感凭据脱敏以及精简尾部日志提取。
+- 🛡️ **严格变更范围管控 (Phase 6)**：基于 Git 状态与 Diff 的边界检查 (`orchestration/scope.py`)，拦截任何超出 `allowed_paths` 或落入 `forbidden_paths` 的已提交、已暂存、未暂存及未跟踪文件。
+- 📊 **标准完成报告与指标 (Phase 6)**：生成 Section 30 JSON Completion Report 并向 `.agent/metrics.jsonl` 追加结构化执行指标。
+- 🛠️ **`agentctl` 统一控制工具 (Phase 6)**：支持 `agentctl task validate`、`agentctl task verify`、`agentctl executors`、`agentctl health` 及 `agentctl invoke`。
 - 🌐 **统一 Generic Executor API (Phase 2 & 4)**：提供标准化的执行器发现 (`GET /v1/executors`)、健康检查 (`GET /v1/executors/{executor}/health`) 与统一调用 (`POST /v1/executors/{executor}/invoke`)。
 - 🤖 **多执行器后端支持**：同时支持 Google Antigravity (`agy`) 与 Grok Build (`grok`) 无头 CLI 运行环境。
 - 📊 **Section 10 统一结果契约**：所有执行器统一返回 `ExecutorResult` 结构 (`status`, `executor`, `session_id`, `response`, `exit_code`, `timing`, `usage`, `warnings`, `error`, `raw`)。
@@ -198,6 +203,42 @@ curl -s -X POST http://127.0.0.1:8765/v1/executors/grok/invoke \
 
 ---
 
+## 🛠️ `agentctl` 命令行工具 (Phase 6)
+
+仓库提供 `agentctl` 实用工具用于任务校验、流水线验证以及执行器状态检查：
+
+### 1. 任务模型静态校验
+无需执行任何命令，直接校验 Task JSON 是否合规：
+```bash
+./agentctl task validate .agent/tasks/TASK-001.json
+```
+输出示例：
+```text
+Task validation PASSED: '.agent/tasks/TASK-001.json'
+  Task ID:        TASK-001
+  Goal:           增加 Telegram 下载任务取消功能
+  Executor:       agy
+  Complexity:     M
+  Risk:           medium
+  Repository:     /workspace/project (base_commit=abc1234)
+  Scope:          allowed=2, forbidden=1
+  Verification:   2 commands declared
+```
+
+### 2. 任务机器验证流水线
+运行机器验证命令并执行 Git 范围边界检查：
+```bash
+./agentctl task verify .agent/tasks/TASK-001.json --json
+```
+
+### 3. 执行器与健康检查
+```bash
+./agentctl executors
+./agentctl health
+```
+
+---
+
 ## 🛡️ 安全与限额参数规范
 
 | 指标 / 防线 | 配置值 / 策略 | 详细说明 |
@@ -206,6 +247,8 @@ curl -s -X POST http://127.0.0.1:8765/v1/executors/grok/invoke \
 | **会话并发互斥** | `HTTP 409 Conflict` | 跨 Generic 与 Legacy 统一互斥保护 |
 | **Gateway 全局任务上限** | `GATEWAY_MAX_CONCURRENCY`（默认 `2`） | 覆盖所有执行器的全局有界信号量，超额返回 `HTTP 429` |
 | **执行器任务上限** | `AGY_MAX_CONCURRENCY=1`、`GROK_MAX_CONCURRENCY=1` | 各执行器独立有界信号量，超额返回 `HTTP 429` |
+| **范围越界管控** | Git 状态/Diff 对比 allowed/forbidden globs | 发生任何越界返回 `scope_violation` 失败 |
+| **安全机器验证** | `shell=False` 在仓库 `cwd` 中隔离执行 | 进程组 SIGKILL 强杀、敏感凭据脱敏与精简尾部日志 |
 | **任务执行预算** | 请求 `timeout_sec` 或执行器默认值 | 组合期限到期后通过 `os.killpg(pgid, SIGKILL)` 清理进程组 |
 | **传输等待余量** | `+5.0 秒` | 外层 Future 等待窗口在任务超时上额外增加 5 秒 |
 | **最大连接数** | `50` | `45 POST` + `5 通用` 配额；最后 5 个槽并非 `/health` 专属 |

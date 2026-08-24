@@ -50,6 +50,22 @@ class ExecutorRegistry:
         """Return the list of all registered executor names."""
         return list(self._executors.keys())
 
+    def items(self):
+        """Return items view of registered executors."""
+        return self._executors.items()
+
+    def keys(self):
+        """Return keys view of registered executors."""
+        return self._executors.keys()
+
+    def values(self):
+        """Return values view of registered executors."""
+        return self._executors.values()
+
+    def __iter__(self):
+        """Iterate over registered executor names."""
+        return iter(self._executors)
+
 
 def validate_invoke_request(payload: Any) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """

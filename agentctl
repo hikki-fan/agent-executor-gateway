@@ -1,0 +1,274 @@
+#!/usr/bin/env python3
+"""
+agentctl — CLI Management and Task Orchestration Tool for Agent Executor Gateway.
+
+Supported commands per Goal Prompt Section 39 & Phase 6:
+- agentctl task validate TASK.json
+- agentctl task verify TASK.json [--repo PATH] [--log-dir DIR] [--timeout SEC]
+- agentctl executors
+- agentctl health
+- agentctl invoke <executor> --cwd <CWD> --prompt <PROMPT> [--session-id <ID>]
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+
+# Ensure repository root is on sys.path
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+
+from orchestration.task import load_and_validate_task, validate_task_dict
+from orchestration.verifier import verify_task
+from orchestration.report import generate_completion_report, record_task_metrics
+
+
+def cmd_task_validate(args: argparse.Namespace) -> int:
+    """Validate task JSON file and print report."""
+    filepath = args.task_file
+    if not os.path.exists(filepath):
+        print(f"Error: Task file not found: '{filepath}'", file=sys.stderr)
+        return 1
+
+    task, errors = load_and_validate_task(filepath)
+    if errors or task is None:
+        print(f"Task validation FAILED for '{filepath}':", file=sys.stderr)
+        for err in errors:
+            print(f"  - {err}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(task.to_json(indent=2))
+    else:
+        print(f"Task validation PASSED: '{filepath}'")
+        print(f"  Task ID:        {task.task_id}")
+        print(f"  Goal:           {task.goal}")
+        print(f"  Executor:       {task.execution.executor}")
+        print(f"  Complexity:     {task.classification.complexity}")
+        print(f"  Risk:           {task.classification.risk}")
+        print(f"  Repository:     {task.repository.path} (base_commit={task.repository.base_commit})")
+        print(f"  Scope:          allowed={len(task.scope.allowed_paths)}, forbidden={len(task.scope.forbidden_paths)}")
+        print(f"  Verification:   {len(task.verification.commands)} commands declared")
+    return 0
+
+
+def cmd_task_verify(args: argparse.Namespace) -> int:
+    """Run verification pipeline (commands + scope check) for a task."""
+    filepath = args.task_file
+    if not os.path.exists(filepath):
+        print(f"Error: Task file not found: '{filepath}'", file=sys.stderr)
+        return 1
+
+    task, errors = load_and_validate_task(filepath)
+    if errors or task is None:
+        print(f"Error: Cannot verify invalid task file '{filepath}':", file=sys.stderr)
+        for err in errors:
+            print(f"  - {err}", file=sys.stderr)
+        return 1
+
+    start_time = time.monotonic()
+    try:
+        verif_result = verify_task(
+            task=task,
+            repo_path=args.repo,
+            command_timeout_sec=args.timeout,
+            log_dir=args.log_dir,
+            skip_scope=args.skip_scope,
+        )
+    except Exception as e:
+        print(f"Error during verification execution: {e}", file=sys.stderr)
+        return 1
+
+    duration_ms = int((time.monotonic() - start_time) * 1000)
+
+    # Generate completion report
+    report = generate_completion_report(
+        task=task,
+        verification=verif_result,
+        executor=task.execution.executor,
+        session_id=args.session_id,
+        repo_path=args.repo,
+    )
+
+    # Append metric to .agent/metrics.jsonl
+    try:
+        metric_file = record_task_metrics(
+            task=task,
+            verification=verif_result,
+            duration_ms=duration_ms,
+            attempts=1,
+            fallback_used=False,
+            review_pass=True,
+            repo_path=args.repo,
+            metrics_file_path=args.metrics_file,
+        )
+    except Exception as e:
+        print(f"Warning: Failed to record metrics: {e}", file=sys.stderr)
+        metric_file = ""
+
+    if args.json:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    else:
+        print(f"=== Task Verification Report: {task.task_id} ===")
+        print(f"Status:       {verif_result.status.upper()}")
+        if verif_result.reason:
+            print(f"Failure:      {verif_result.reason}")
+        print(f"Summary:      {verif_result.summary}")
+        print(f"Duration:     {duration_ms}ms")
+        print(f"Scope Check:  {'PASSED' if verif_result.scope_result.passed else 'FAILED'}")
+        if not verif_result.scope_result.passed:
+            print(f"  Scope Violations ({len(verif_result.scope_result.violating_files)}):")
+            for vf in verif_result.scope_result.violating_files:
+                print(f"    - {vf}")
+        print(f"Commands ({len(verif_result.command_results)}):")
+        for idx, cr in enumerate(verif_result.command_results, start=1):
+            print(f"  [{idx}] {cr.command} -> {cr.status.upper()} (exit {cr.exit_code}, {cr.duration_ms}ms)")
+            if cr.log_path:
+                print(f"      Log: {cr.log_path}")
+        if metric_file:
+            print(f"Metrics:      Appended to {metric_file}")
+
+    return 0 if verif_result.status == "passed" else 1
+
+
+def cmd_executors(args: argparse.Namespace) -> int:
+    """List available and registered executors."""
+    try:
+        from acp_server import executor_registry
+        executors = executor_registry.list_executors()
+        if args.json:
+            print(json.dumps({"executors": executors}, indent=2))
+        else:
+            print("Registered Executors:")
+            for exc in executors:
+                status_mark = "✓" if exc.get("available") else "✗"
+                print(
+                    f"  [{status_mark}] {exc.get('name')}: "
+                    f"supports_session={exc.get('supports_session')}"
+                )
+        return 0
+    except Exception as e:
+        print(f"Error querying executors: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_health(args: argparse.Namespace) -> int:
+    """Probe server and executors health."""
+    try:
+        from acp_server import executor_registry
+        health_data = {
+            "status": "online",
+            "executors": {
+                name: executor_registry.get(name).health()
+                for name in executor_registry.registered_names()
+            },
+        }
+        print(json.dumps(health_data, indent=2))
+        return 0
+    except Exception as e:
+        print(f"Error querying health: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_invoke(args: argparse.Namespace) -> int:
+    """Directly invoke an executor with prompt and options."""
+    try:
+        from acp_server import executor_registry
+        adapter = executor_registry.get(args.executor)
+        if not adapter:
+            print(f"Error: Executor '{args.executor}' not found", file=sys.stderr)
+            return 1
+
+        result = adapter.invoke(
+            prompt=args.prompt,
+            cwd=args.cwd,
+            session_id=args.session_id,
+            model=args.model,
+            effort=args.effort,
+            timeout_sec=args.timeout,
+        )
+        print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+        return 0 if result.status in ("success", "partial_success") else 1
+    except Exception as e:
+        print(f"Error during invocation: {e}", file=sys.stderr)
+        return 1
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="agentctl",
+        description="Agent Executor Gateway Control CLI",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # 1. agentctl task ...
+    task_parser = subparsers.add_parser("task", help="Task management and validation commands")
+    task_subparsers = task_parser.add_subparsers(dest="task_subcommand", required=True)
+
+    # agentctl task validate TASK.json
+    val_parser = task_subparsers.add_parser("validate", help="Validate a Task JSON specification file")
+    val_parser.add_argument("task_file", help="Path to Task JSON file")
+    val_parser.add_argument("--json", action="store_true", help="Output validated Task as JSON")
+
+    # agentctl task verify TASK.json
+    ver_parser = task_subparsers.add_parser("verify", help="Run verification commands and scope checking for a Task")
+    ver_parser.add_argument("task_file", help="Path to Task JSON file")
+    ver_parser.add_argument("--repo", default=None, help="Override repository working directory")
+    ver_parser.add_argument("--log-dir", default=None, help="Directory to store verification logs")
+    ver_parser.add_argument("--metrics-file", default=None, help="Path to metrics.jsonl file")
+    ver_parser.add_argument("--session-id", default=None, help="Execution session identifier for report")
+    ver_parser.add_argument("--timeout", type=float, default=120.0, help="Per-command execution timeout in seconds")
+    ver_parser.add_argument("--skip-scope", action="store_true", help="Skip Git scope boundary checking")
+    ver_parser.add_argument("--json", action="store_true", help="Output Completion Report as JSON")
+
+    # agentctl task run TASK.json (Explicitly reject in Phase 6)
+    run_parser = task_subparsers.add_parser("run", help="Run task execution (Phase 7+)")
+    run_parser.add_argument("task_file", help="Path to Task JSON file")
+
+    # 2. agentctl executors
+    exc_parser = subparsers.add_parser("executors", help="List registered executors and their capabilities")
+    exc_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    # 3. agentctl health
+    hlt_parser = subparsers.add_parser("health", help="Probe gateway and executor health")
+
+    # 4. agentctl invoke <executor> --prompt ... --cwd ...
+    inv_parser = subparsers.add_parser("invoke", help="Invoke an executor with prompt")
+    inv_parser.add_argument("executor", choices=["agy", "grok"], help="Executor name")
+    inv_parser.add_argument("--prompt", "-p", required=True, help="Task instruction prompt")
+    inv_parser.add_argument("--cwd", default=None, help="Working directory for executor")
+    inv_parser.add_argument("--session-id", "-s", default=None, help="Existing session ID to resume")
+    inv_parser.add_argument("--model", "-m", default=None, help="Model override")
+    inv_parser.add_argument("--effort", "-e", default=None, help="Reasoning effort override")
+    inv_parser.add_argument("--timeout", "-t", type=int, default=None, help="Execution timeout in seconds")
+
+    parsed = parser.parse_args()
+
+    if parsed.command == "task":
+        if parsed.task_subcommand == "validate":
+            return cmd_task_validate(parsed)
+        elif parsed.task_subcommand == "verify":
+            return cmd_task_verify(parsed)
+        elif parsed.task_subcommand == "run":
+            print(
+                "Error: 'agentctl task run' is not implemented in Phase 6 (requires Phase 7+ routing and escalation).",
+                file=sys.stderr,
+            )
+            return 1
+    elif parsed.command == "executors":
+        return cmd_executors(parsed)
+    elif parsed.command == "health":
+        return cmd_health(parsed)
+    elif parsed.command == "invoke":
+        return cmd_invoke(parsed)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
