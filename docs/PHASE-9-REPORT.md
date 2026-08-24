@@ -109,6 +109,14 @@ python3 -m unittest discover -s . -v
 
 ## 5. Opt-in Live Smoke Testing Instructions
 
+### Latest isolated runtime evidence (2026-08-24)
+
+* Candidate port `8766` started and passed `/health` plus executor discovery.
+* A real AGY invocation through the candidate returned `success` and created a requested file in a disposable `/tmp` workspace.
+* The dedicated AGY cwd regression was retried after the account reached its upstream limit and correctly returned the structured `Individual quota reached` error; no production process was involved.
+* The authenticated Grok disposable create/resume smoke passed in 17.995 seconds.
+* The candidate was stopped afterward; production port `8765` remained online on the legacy PID `119`.
+
 To run end-to-end live smoke tests against running AGY and Grok runtime binaries on candidate port 8766:
 
 ```bash

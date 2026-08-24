@@ -77,8 +77,12 @@ The following checks were run after the hardening changes:
 * `python3 -m unittest tests.test_phase10_migration -q`: **29 tests passed**.
 * `bash -n scripts/migrate_production.sh scripts/gateway_watchdog.sh`: passed.
 * `git diff --check`: passed.
+* Isolated candidate runtime on `8766`: health and executor discovery passed; one real AGY invoke returned `success` and created a file in a disposable `/tmp` workspace.
+* Grok live disposable smoke (create/resume `hello.txt`): **passed** in 17.995s with `GROK_HOME=/home/codex/.grok`.
+* A repeat of the dedicated AGY cwd regression was blocked by the upstream response `Individual quota reached` (the Gateway correctly returned HTTP 500 with the structured error); this is an account-quota limitation, not a Gateway failure.
 * Live preflight: returned `1` as intended because startup handoff is not installed.
 * Live preflight created no migration runtime directory, changed no legacy file metadata, changed no legacy repository content, and left PID `119` and port `8765` healthy before and after the probe.
+* The candidate was stopped after the smoke checks; port `8766` is closed.
 
 ## 8. Remaining authorized operations
 
