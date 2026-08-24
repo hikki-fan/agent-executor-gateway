@@ -18,14 +18,17 @@ import signal
 import socketserver
 import subprocess
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from adapters.antigravity import AntigravityAdapter, AntigravityConfig
+from api.executors import ExecutorRegistry, validate_invoke_request
 from core.auth import load_or_create_token, verify_bearer_token
 from core.concurrency import AdmissionController
 from core.config import GatewayConfig
 from core.process import run_process_group
+from core.result import ExecutorResult, normalize_usage
 from core.session_lock import SessionLockManager
 
 # Instantiate transport-level gateway configuration and AGY provider configuration
@@ -120,6 +123,10 @@ agy_adapter = AntigravityAdapter(
     config=agy_config,
 )
 
+# Generic Executor Registry managing registered adapters
+executor_registry = ExecutorRegistry()
+executor_registry.register(agy_adapter)
+
 
 # Thin compatibility wrappers delegating to AntigravityAdapter
 def build_agy_command(
@@ -208,6 +215,8 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = self.path.rstrip("/")
+        parts = [p for p in path.split("/") if p]
+
         if path in ("/health", "/acp/v1/status"):
             self._send_json({
                 "status": "online",
@@ -233,11 +242,21 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
                     "admission_control": f"HTTP 429 Bounded Semaphore ({AGY_MAX_CONCURRENCY})",
                 },
             })
+        elif path == "/v1/executors":
+            self._send_json({"executors": executor_registry.list_executors()})
+        elif len(parts) == 4 and parts[0] == "v1" and parts[1] == "executors" and parts[3] == "health":
+            executor_name = parts[2]
+            adapter = executor_registry.get(executor_name)
+            if adapter is None:
+                self._send_json({"error": f"Executor '{executor_name}' not found"}, status=404)
+            else:
+                self._send_json(adapter.health(), status=200)
         else:
             self._send_json({"error": "Endpoint not found"}, status=404)
 
     def do_POST(self) -> None:
         path = self.path.rstrip("/")
+        parts = [p for p in path.split("/") if p]
 
         # Enforce POST Connection Capacity Limit (45 max)
         acquired_post = post_connection_semaphore.acquire(blocking=False)
@@ -270,7 +289,115 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
                 return self._send_json({"error": f"Invalid JSON payload: {str(e)}"}, status=400)
 
             # 3. Route Dispatch
-            if path in ("/acp/v1/invoke", "/acp/v1/new-conversation"):
+            # Generic Executor API: POST /v1/executors/{name}/invoke
+            if len(parts) == 4 and parts[0] == "v1" and parts[1] == "executors" and parts[3] == "invoke":
+                executor_name = parts[2]
+                adapter = executor_registry.get(executor_name)
+                if adapter is None:
+                    return self._send_json({"error": f"Executor '{executor_name}' not found"}, status=404)
+
+                valid_params, err_msg = validate_invoke_request(payload)
+                if err_msg is not None:
+                    return self._send_json({"error": err_msg}, status=400)
+
+                prompt = valid_params["prompt"]
+                cwd = valid_params["cwd"]
+                session_id = valid_params["session_id"]
+                model = valid_params["model"]
+                effort = valid_params["effort"]
+                timeout_sec = valid_params["timeout_sec"]
+
+                # 4. Check per-session concurrency lock (HTTP 409)
+                if session_id and not session_lock_manager.acquire(executor_name, session_id):
+                    err_res = ExecutorResult(
+                        status="error",
+                        executor=executor_name,
+                        session_id=session_id,
+                        error=f"Conflict: Session {session_id} is currently executing another turn",
+                    )
+                    return self._send_json(err_res.to_dict(), status=409)
+
+                # 5. Check global concurrency semaphore (HTTP 429)
+                acquired_agent = agent_semaphore.acquire(blocking=False)
+                if not acquired_agent:
+                    if session_id:
+                        session_lock_manager.release(executor_name, session_id)
+                    err_res = ExecutorResult(
+                        status="error",
+                        executor=executor_name,
+                        session_id=session_id,
+                        error=f"Too Many Requests: Maximum {AGY_MAX_CONCURRENCY} concurrent agent tasks active",
+                    )
+                    return self._send_json(err_res.to_dict(), status=429)
+
+                try:
+                    start_time = time.monotonic()
+                    transport_margin = 5.0
+                    if timeout_sec is not None:
+                        invoke_timeout = int(timeout_sec) if isinstance(timeout_sec, int) else float(timeout_sec)
+                        future_timeout = float(timeout_sec) + transport_margin
+                    else:
+                        invoke_timeout = None
+                        future_timeout = float(agy_adapter.total_process_timeout) + transport_margin
+
+                    future = None
+                    try:
+                        future = agent_executor.submit(
+                            adapter.invoke,
+                            prompt=prompt,
+                            cwd=cwd,
+                            session_id=session_id,
+                            model=model,
+                            effort=effort,
+                            timeout_sec=invoke_timeout,
+                        )
+                        result = future.result(timeout=future_timeout)
+
+                        if result.status in ("success", "partial_success"):
+                            self._send_json(result.to_dict(), status=200)
+                        else:
+                            self._send_json(result.to_dict(), status=500)
+                    except (subprocess.TimeoutExpired, TimeoutError):
+                        if future:
+                            future.cancel()
+                        duration_ms = int((time.monotonic() - start_time) * 1000)
+                        effective_t = timeout_sec if timeout_sec is not None else agy_adapter.total_process_timeout
+                        err_res = ExecutorResult(
+                            status="error",
+                            executor=executor_name,
+                            session_id=session_id,
+                            response=None,
+                            exit_code=None,
+                            timing={"duration_ms": duration_ms},
+                            usage=normalize_usage(None),
+                            warnings=[],
+                            error=f"Executor '{executor_name}' task execution timed out after {effective_t}s",
+                            raw={},
+                        )
+                        self._send_json(err_res.to_dict(), status=504)
+                    except Exception as e:
+                        if future:
+                            future.cancel()
+                        duration_ms = int((time.monotonic() - start_time) * 1000)
+                        err_res = ExecutorResult(
+                            status="error",
+                            executor=executor_name,
+                            session_id=session_id,
+                            response=None,
+                            exit_code=None,
+                            timing={"duration_ms": duration_ms},
+                            usage=normalize_usage(None),
+                            warnings=[],
+                            error=f"Internal executor failure: {str(e)}",
+                            raw={},
+                        )
+                        self._send_json(err_res.to_dict(), status=500)
+                finally:
+                    agent_semaphore.release()
+                    if session_id:
+                        session_lock_manager.release(executor_name, session_id)
+
+            elif path in ("/acp/v1/invoke", "/acp/v1/new-conversation"):
                 prompt = payload.get("prompt", "")
                 model = payload.get("model")
                 effort = payload.get("effort")
