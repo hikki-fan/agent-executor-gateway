@@ -22,6 +22,7 @@ import re
 import shlex
 import shutil
 import stat
+import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -322,5 +323,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except HandoffError as exc:
-        print(f"Startup handoff refused: {exc}", file=os.sys.stderr)
+        print(f"Startup handoff refused: {exc}", file=sys.stderr)
         raise SystemExit(1)
