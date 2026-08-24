@@ -380,18 +380,34 @@ class TestCoreNeutrality(unittest.TestCase):
         core_files = glob.glob(os.path.join(core_dir, "*.py"))
         self.assertGreater(len(core_files), 0, "Core directory must contain python files")
 
-        forbidden_imports = {"adapters", "acp_server", "adapters.base", "adapters.antigravity"}
+        forbidden_imports = {
+            "adapters",
+            "acp_server",
+            "adapters.base",
+            "adapters.antigravity",
+            "adapters.grok",
+        }
         forbidden_terms = {
             "agy",
             "antigravity",
+            "grok",
             "conversation_id",
             "--conversation",
             "--output-format",
             "--dangerously-skip-permissions",
+            "--session-id",
+            "--resume",
+            "--permission-mode",
             "AGY_BIN",
             "AGY_MAX_CONCURRENCY",
             "ACP_AGENT_TIMEOUT_SEC",
             "ACP_AUTH_GRACE_SEC",
+            "GROK_BIN",
+            "GROK_MODEL",
+            "GROK_EFFORT",
+            "GROK_AGENT_TIMEOUT_SEC",
+            "GROK_PERMISSION_MODE",
+            "GROK_MAX_TURNS",
         }
 
         for file_path in core_files:

@@ -4,24 +4,25 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/Version-2.4.0-blue.svg)]()
-[![Status](https://img.shields.io/badge/Status-Phase%202%20Candidate-yellow.svg)]()
+[![Status](https://img.shields.io/badge/Status-Phase%204%20Candidate-green.svg)]()
 
 High-reliability, executor-neutral **Agent Executor Gateway** providing unified REST API orchestration, session management, and process lifecycle controls for AI coding agents.
 
 > [!NOTE]
-> **Phase 2 Status**: Generic Executor API is introduced with `agy` registered. Legacy ACP API endpoints remain backward compatible under the tested contracts. Additional executors (such as Grok) and full production migration will occur in subsequent phases.
+> **Phase 4 Status**: Generic Executor API is operational with both Google Antigravity (`agy`) and Grok Build (`grok`) registered. Legacy ACP API behavior is preserved under the tested compatibility contracts. Multi-executor advanced concurrency scheduling and production gateway migration are planned for Phase 5.
 
 ---
 
 ## 🌟 Key Features
 
-- 🌐 **Unified Generic Executor API (Phase 2)**: Standardized executor discovery (`GET /v1/executors`), health checks (`GET /v1/executors/{executor}/health`), and invocation (`POST /v1/executors/{executor}/invoke`).
+- 🌐 **Unified Generic Executor API (Phase 2 & 4)**: Standardized executor discovery (`GET /v1/executors`), health checks (`GET /v1/executors/{executor}/health`), and invocation (`POST /v1/executors/{executor}/invoke`).
+- 🤖 **Multi-Provider Support**: Supports both Google Antigravity (`agy`) and Grok Build (`grok`) headless CLI runtimes.
 - 📊 **Section 10 Standardized Result Contract**: Uniform `ExecutorResult` schema across all executors (`status`, `executor`, `session_id`, `response`, `exit_code`, `timing`, `usage`, `warnings`, `error`, `raw`).
 - 🎯 **Explicit 1:1 Session Isolation**: Stateless gateway routing where clients hold `session_id` (or legacy `conversation_id`). Zero global `agy -c` preemption.
 - 🔒 **Per-Session Concurrency Lock**: Rejects concurrent turns within the same `(executor, session_id)` with `HTTP 409 Conflict` across both Generic and Legacy endpoints.
 - 🛑 **Global Admission Control (HTTP 429)**: Shared executor concurrency semaphore with non-blocking `HTTP 429 Too Many Requests` rejection when saturated.
 - ⏱️ **Flexible Timeout Budgets**: Per-request `timeout_sec` overrides determine both execution deadline and future waiting windows (+5s transport margin), with automatic process group termination (`SIGKILL via os.killpg`).
-- 🔁 **Intelligent Pre-execution Retry**: Retries transient 0-turn startup errors (EOF/network) up to 3 times on new sessions while preserving in-flight errors.
+- 🔁 **Intelligent Pre-execution Retry**: Retries transient 0-turn startup errors (EOF/network) up to 3 times on new AGY sessions while preserving in-flight errors.
 - 🟡 **Partial-success Preservation**: Contradictory `ERROR` status with usable output is returned as HTTP 200 `partial_success` with warnings and diagnostic details.
 - 🔐 **Strict Bearer Token Auth**: All POST operations require `Authorization: Bearer <TOKEN>` authentication (`0600` restricted permissions).
 - ⚡ **General Probe Capacity**: The independent 45-POST cap leaves five general HTTP connection slots available for probes and other requests; these slots are not exclusive to `/health`.
@@ -50,17 +51,18 @@ High-reliability, executor-neutral **Agent Executor Gateway** providing unified 
                                                     ▼
                                     ┌────────────────────────────────┐
                                     │      ExecutorAdapter (ABC)     │
+                                    └───────┬────────────────┬───────┘
+                                            │                │
+                                            ▼                ▼
+                     ┌────────────────────────────┐    ┌───────────────────────────┐
+                     │  AntigravityAdapter (agy)  │    │     GrokAdapter (grok)    │
+                     │  - 1:1 session_id mapping  │    │  - Headless CLI (-p)      │
+                     │  - Flags ordering before -p│    │  - --session-id / --resume│
+                     │  - Pre-execution retry     │    │  - JSON parsing & usage   │
+                     │  - Uniform ExecutorResult  │    │  - Uniform ExecutorResult │
+                     └──────────────┬─────────────┘    └─────────────┬─────────────┘
+                                    │                                │
                                     └───────────────┬────────────────┘
-                                                    │
-                                                    ▼
-                                    ┌────────────────────────────────┐
-                                    │     AntigravityAdapter (agy)   │
-                                    │  - 1:1 session_id mapping      │
-                                    │  - Flags ordering before -p    │
-                                    │  - Pre-execution retry         │
-                                    │  - Uniform ExecutorResult      │
-                                    └───────────────┬────────────────┘
-                                                    │
                                                     ▼
                                     ┌────────────────────────────────┐
                                     │      core/process.py           │
@@ -73,7 +75,7 @@ High-reliability, executor-neutral **Agent Executor Gateway** providing unified 
 
 ## 📡 REST API Reference
 
-### 1. Generic Executor API (Phase 2)
+### 1. Generic Executor API (Phase 2 & 4)
 
 #### Executor Discovery (`GET /v1/executors`)
 No authentication required.
@@ -88,32 +90,27 @@ Response:
       "name": "agy",
       "available": true,
       "supports_session": true
+    },
+    {
+      "name": "grok",
+      "available": true,
+      "supports_session": true
     }
   ]
 }
 ```
 
-#### Executor Health Probe (`GET /v1/executors/{executor}/health`)
+#### Executor Health Probes (`GET /v1/executors/{executor}/health`)
 No authentication required.
 ```bash
 curl -s http://127.0.0.1:8765/v1/executors/agy/health
-```
-Response:
-```json
-{
-  "status": "online",
-  "service": "Antigravity REST Bridge Server",
-  "version": "2.4.0",
-  "mode": "explicit_conversation_cli",
-  "binary": "/home/codex/.local/bin/agy",
-  "available": true
-}
+curl -s http://127.0.0.1:8765/v1/executors/grok/health
 ```
 
 #### Invoke Executor Task (`POST /v1/executors/{executor}/invoke`)
-Requires Bearer Token authentication.
+Requires Bearer Token authentication. Supported executors: `agy`, `grok`.
 
-- **Start New Task / Session**:
+- **Start New AGY Task**:
 ```bash
 TOKEN=$(cat ~/.codex/acp_token)
 curl -s -X POST http://127.0.0.1:8765/v1/executors/agy/invoke \
@@ -129,16 +126,32 @@ curl -s -X POST http://127.0.0.1:8765/v1/executors/agy/invoke \
   }'
 ```
 
-- **Continue Existing Session**:
+- **Start New Grok Task**:
 ```bash
 TOKEN=$(cat ~/.codex/acp_token)
-curl -s -X POST http://127.0.0.1:8765/v1/executors/agy/invoke \
+curl -s -X POST http://127.0.0.1:8765/v1/executors/grok/invoke \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "prompt": "Fix test failures from previous run",
+    "prompt": "Create new data processing pipeline",
     "cwd": "/workspace/project",
-    "session_id": "f4a0fc45-3d6c-462a-ab20-038a5fd8a04b"
+    "session_id": null,
+    "model": "grok-4.6",
+    "effort": "high",
+    "timeout_sec": 900
+  }'
+```
+
+- **Continue Existing Grok Session**:
+```bash
+TOKEN=$(cat ~/.codex/acp_token)
+curl -s -X POST http://127.0.0.1:8765/v1/executors/grok/invoke \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Add unit tests for the pipeline",
+    "cwd": "/workspace/project",
+    "session_id": "01a0315c-0241-74b0-beb0-ff058535d5d6"
   }'
 ```
 
@@ -147,23 +160,23 @@ All generic invocations return the Section 10 standard schema:
 ```json
 {
   "status": "success",
-  "executor": "agy",
-  "session_id": "f4a0fc45-3d6c-462a-ab20-038a5fd8a04b",
-  "response": "Refactoring completed successfully.",
+  "executor": "grok",
+  "session_id": "01a0315c-0241-74b0-beb0-ff058535d5d6",
+  "response": "Created data processing pipeline with comprehensive unit tests.",
   "exit_code": 0,
   "timing": {
-    "duration_ms": 4520
+    "duration_ms": 5210
   },
   "usage": {
-    "input_tokens": 240,
-    "output_tokens": 120,
-    "total_tokens": 360,
-    "cost_usd": null
+    "input_tokens": 11144,
+    "output_tokens": 145,
+    "total_tokens": 14136,
+    "cost_usd": 0.00408816
   },
   "warnings": [],
   "error": null,
   "raw": {
-    "parsed": {"status": "SUCCESS"},
+    "parsed": {"text": "...", "stopReason": "end_turn"},
     "stdout": "...",
     "stderr": ""
   }
@@ -194,7 +207,7 @@ The Gateway maintains full backward compatibility for legacy clients:
 | **Session Model** | Explicit `session_id` / `conversation_id` | Client-held stateless routing; zero `agy -c` preemption |
 | **Session Lock** | `HTTP 409 Conflict` | Protects in-flight turns from concurrent collisions across Generic and Legacy |
 | **Max Concurrency** | `AGY_MAX_CONCURRENCY` (Default `1`)| Enforced by shared bounded semaphore (`HTTP 429` on overflow) |
-| **Timeout Budget** | Request `timeout_sec` or `ACP_AGENT_TIMEOUT_SEC` | Monotonic budget; killed via `os.killpg(pgid, SIGKILL)` on expiration |
+| **Timeout Budget** | Request `timeout_sec` or provider defaults | Monotonic budget; killed via `os.killpg(pgid, SIGKILL)` on expiration |
 | **Transport Margin**| `+5.0 seconds` | Outer Future wait margin over task timeout |
 | **Max HTTP Sockets**| `50` | `45 POST` cap plus `5` general HTTP slots; the final slots are not health-exclusive |
 | **Socket Idle Timeout** | `10.0 seconds` | Prevents Slowloris socket starvation |

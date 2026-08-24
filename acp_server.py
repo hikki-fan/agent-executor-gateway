@@ -23,6 +23,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from adapters.antigravity import AntigravityAdapter, AntigravityConfig
+from adapters.grok import GrokAdapter, GrokConfig
 from api.executors import ExecutorRegistry, validate_invoke_request
 from core.auth import load_or_create_token, verify_bearer_token
 from core.concurrency import AdmissionController
@@ -123,9 +124,17 @@ agy_adapter = AntigravityAdapter(
     config=agy_config,
 )
 
+# Instantiate the GrokAdapter with injected runner and resolved provider config
+grok_config = GrokConfig.from_env()
+grok_adapter = GrokAdapter(
+    runner=_adapter_runner_dispatch,
+    config=grok_config,
+)
+
 # Generic Executor Registry managing registered adapters
 executor_registry = ExecutorRegistry()
 executor_registry.register(agy_adapter)
+executor_registry.register(grok_adapter)
 
 
 # Thin compatibility wrappers delegating to AntigravityAdapter
@@ -333,12 +342,13 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
                 try:
                     start_time = time.monotonic()
                     transport_margin = 5.0
+                    adapter_default_timeout = getattr(adapter, "total_process_timeout", getattr(adapter, "default_timeout_sec", 600))
                     if timeout_sec is not None:
                         invoke_timeout = int(timeout_sec) if isinstance(timeout_sec, int) else float(timeout_sec)
                         future_timeout = float(timeout_sec) + transport_margin
                     else:
                         invoke_timeout = None
-                        future_timeout = float(agy_adapter.total_process_timeout) + transport_margin
+                        future_timeout = float(adapter_default_timeout) + transport_margin
 
                     future = None
                     try:
@@ -361,7 +371,7 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
                         if future:
                             future.cancel()
                         duration_ms = int((time.monotonic() - start_time) * 1000)
-                        effective_t = timeout_sec if timeout_sec is not None else agy_adapter.total_process_timeout
+                        effective_t = timeout_sec if timeout_sec is not None else adapter_default_timeout
                         err_res = ExecutorResult(
                             status="error",
                             executor=executor_name,

@@ -314,14 +314,13 @@ class TestExecutorApiHTTP(unittest.TestCase):
         executors = resp["executors"]
         self.assertIsInstance(executors, list)
 
-        # Phase 2: strictly only 'agy' registered; zero fake grok
-        self.assertEqual(len(executors), 1)
-        agy_entry = executors[0]
-        self.assertEqual(agy_entry["name"], "agy")
-        self.assertIn("available", agy_entry)
-        self.assertIn("supports_session", agy_entry)
-        self.assertTrue(agy_entry["supports_session"])
-        self.assertNotIn("grok", [e["name"] for e in executors])
+        # Verified registered executors: agy and grok
+        self.assertEqual(len(executors), 2)
+        exec_map = {e["name"]: e for e in executors}
+        self.assertIn("agy", exec_map)
+        self.assertIn("grok", exec_map)
+        self.assertTrue(exec_map["agy"]["supports_session"])
+        self.assertTrue(exec_map["grok"]["supports_session"])
 
     def test_04_get_v1_executors_agy_health_delegation(self):
         """GET /v1/executors/agy/health delegates directly to AntigravityAdapter.health()."""
@@ -340,7 +339,7 @@ class TestExecutorApiHTTP(unittest.TestCase):
 
     def test_05_unknown_executor_health_returns_404(self):
         """GET /v1/executors/{unknown}/health returns HTTP 404."""
-        code, resp = self._http_request("/v1/executors/grok/health", token=None)
+        code, resp = self._http_request("/v1/executors/unregistered_executor/health", token=None)
         self.assertEqual(code, 404)
         self.assertIn("not found", resp.get("error", "").lower())
 
@@ -351,8 +350,8 @@ class TestExecutorApiHTTP(unittest.TestCase):
     def test_06_unknown_executor_invoke_returns_404(self):
         """POST /v1/executors/{unknown}/invoke returns HTTP 404."""
         code, resp = self._http_request(
-            "/v1/executors/grok/invoke",
-            data={"prompt": "Task for grok"},
+            "/v1/executors/unregistered_executor/invoke",
+            data={"prompt": "Task for unregistered"},
             token=TEST_TOKEN,
         )
         self.assertEqual(code, 404)
