@@ -32,9 +32,10 @@ from core.process import run_process_group
 from core.result import ExecutorResult, normalize_usage
 from core.session_lock import SessionLockManager
 
-# Instantiate transport-level gateway configuration and AGY provider configuration
+# Instantiate transport-level gateway configuration and provider configurations
 gateway_config = GatewayConfig.from_env()
 agy_config = AntigravityConfig.from_env()
+grok_config = GrokConfig.from_env()
 
 PORT = gateway_config.port
 TOKEN_FILE = gateway_config.token_file
@@ -45,6 +46,8 @@ SOCKET_TIMEOUT = gateway_config.socket_timeout_sec
 
 AGY_BIN = agy_config.bin_path
 AGY_MAX_CONCURRENCY = agy_config.max_concurrency
+GROK_MAX_CONCURRENCY = grok_config.max_concurrency
+GATEWAY_MAX_CONCURRENCY = gateway_config.max_gateway_concurrency
 SUBPROCESS_TIMEOUT = agy_config.subprocess_timeout_sec
 AUTH_GRACE_SEC = agy_config.auth_grace_sec
 TOTAL_PROCESS_TIMEOUT = agy_config.total_process_timeout_sec
@@ -53,15 +56,22 @@ TOTAL_PROCESS_TIMEOUT = agy_config.total_process_timeout_sec
 ACP_AUTH_TOKEN = load_or_create_token(TOKEN_FILE)
 EXPECTED_BEARER_HEADER = f"Bearer {ACP_AUTH_TOKEN}"
 
-# Admission controller for connection and execution limits
+# Admission controller for connection and multi-executor execution limits (Phase 5)
 admission_controller = AdmissionController(
     max_http_connections=MAX_HTTP_CONNECTIONS,
     max_post_connections=MAX_POST_CONNECTIONS,
-    max_worker_concurrency=AGY_MAX_CONCURRENCY,
+    max_worker_concurrency=GATEWAY_MAX_CONCURRENCY,
+    executor_limits={
+        "agy": AGY_MAX_CONCURRENCY,
+        "grok": GROK_MAX_CONCURRENCY,
+    },
 )
 
 # Exported semaphores for compatibility with tests & legacy inspection
-agent_semaphore = admission_controller.worker_semaphore
+gateway_semaphore = admission_controller.gateway_semaphore
+agent_semaphore = gateway_semaphore
+agy_semaphore = admission_controller._executor_semaphores["agy"]
+grok_semaphore = admission_controller._executor_semaphores["grok"]
 http_connection_semaphore = admission_controller.http_semaphore
 post_connection_semaphore = admission_controller.post_semaphore
 
@@ -125,7 +135,6 @@ agy_adapter = AntigravityAdapter(
 )
 
 # Instantiate the GrokAdapter with injected runner and resolved provider config
-grok_config = GrokConfig.from_env()
 grok_adapter = GrokAdapter(
     runner=_adapter_runner_dispatch,
     config=grok_config,
@@ -196,8 +205,8 @@ def cli_error_detail(
 
 # Global ThreadPoolExecutor for agent subprocesses
 agent_executor = ThreadPoolExecutor(
-    max_workers=max(AGY_MAX_CONCURRENCY, 4),
-    thread_name_prefix="ACP_AgentWorker",
+    max_workers=max(GATEWAY_MAX_CONCURRENCY * 2, 8),
+    thread_name_prefix="AgentExecutorWorker",
 )
 
 
@@ -244,11 +253,14 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
                     "auth_grace_sec": AUTH_GRACE_SEC,
                     "total_process_timeout_sec": TOTAL_PROCESS_TIMEOUT,
                     "max_worker_threads": AGY_MAX_CONCURRENCY,
+                    "gateway_max_concurrency": GATEWAY_MAX_CONCURRENCY,
+                    "agy_max_concurrency": AGY_MAX_CONCURRENCY,
+                    "grok_max_concurrency": GROK_MAX_CONCURRENCY,
                     "max_http_connections": MAX_HTTP_CONNECTIONS,
                     "max_post_connections": MAX_POST_CONNECTIONS,
                     "reserved_health_slots": MAX_HTTP_CONNECTIONS - MAX_POST_CONNECTIONS,
                     "socket_timeout_sec": SOCKET_TIMEOUT,
-                    "admission_control": f"HTTP 429 Bounded Semaphore ({AGY_MAX_CONCURRENCY})",
+                    "admission_control": f"HTTP 429 Unified Semaphore (gateway={GATEWAY_MAX_CONCURRENCY}, agy={AGY_MAX_CONCURRENCY}, grok={GROK_MAX_CONCURRENCY})",
                 },
             })
         elif path == "/v1/executors":
@@ -327,15 +339,22 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
                     return self._send_json(err_res.to_dict(), status=409)
 
                 # 5. Check global concurrency semaphore (HTTP 429)
-                acquired_agent = agent_semaphore.acquire(blocking=False)
-                if not acquired_agent:
+                acquired_permits, saturated_scope = admission_controller.acquire_execution_permits(
+                    executor_name, blocking=False
+                )
+                if not acquired_permits:
                     if session_id:
                         session_lock_manager.release(executor_name, session_id)
+                    if saturated_scope == "gateway":
+                        err_msg = f"Too Many Requests: Maximum {GATEWAY_MAX_CONCURRENCY} concurrent gateway tasks active"
+                    else:
+                        limit = admission_controller.get_executor_limit(executor_name) or 1
+                        err_msg = f"Too Many Requests: Maximum {limit} concurrent {executor_name} tasks active"
                     err_res = ExecutorResult(
                         status="error",
                         executor=executor_name,
                         session_id=session_id,
-                        error=f"Too Many Requests: Maximum {AGY_MAX_CONCURRENCY} concurrent agent tasks active",
+                        error=err_msg,
                     )
                     return self._send_json(err_res.to_dict(), status=429)
 
@@ -403,7 +422,7 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
                         )
                         self._send_json(err_res.to_dict(), status=500)
                 finally:
-                    agent_semaphore.release()
+                    admission_controller.release_execution_permits(executor_name)
                     if session_id:
                         session_lock_manager.release(executor_name, session_id)
 
@@ -426,13 +445,19 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
                     }, status=409)
 
                 # 5. Check global concurrency semaphore (HTTP 429)
-                acquired_agent = agent_semaphore.acquire(blocking=False)
-                if not acquired_agent:
+                acquired_permits, saturated_scope = admission_controller.acquire_execution_permits(
+                    "agy", blocking=False
+                )
+                if not acquired_permits:
                     if conversation_id:
                         conv_lock_mgr.release(conversation_id)
+                    if saturated_scope == "gateway":
+                        err_msg = f"Too Many Requests: Maximum {GATEWAY_MAX_CONCURRENCY} concurrent gateway tasks active"
+                    else:
+                        err_msg = f"Too Many Requests: Maximum {AGY_MAX_CONCURRENCY} concurrent agent tasks active"
                     return self._send_json({
                         "status": "error",
-                        "error": f"Too Many Requests: Maximum {AGY_MAX_CONCURRENCY} concurrent agent tasks active",
+                        "error": err_msg,
                         "status_code": 429,
                     }, status=429)
 
@@ -502,7 +527,7 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
                             "conversation_id": conversation_id if conversation_id else None,
                         }, status=504)
                 finally:
-                    agent_semaphore.release()
+                    admission_controller.release_execution_permits("agy")
                     if conversation_id:
                         conv_lock_mgr.release(conversation_id)
 
@@ -527,12 +552,18 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
                     }, status=409)
 
                 # Check global concurrency semaphore (HTTP 429)
-                acquired_agent = agent_semaphore.acquire(blocking=False)
-                if not acquired_agent:
+                acquired_permits, saturated_scope = admission_controller.acquire_execution_permits(
+                    "agy", blocking=False
+                )
+                if not acquired_permits:
                     conv_lock_mgr.release(recipient_id)
+                    if saturated_scope == "gateway":
+                        err_msg = f"Too Many Requests: Maximum {GATEWAY_MAX_CONCURRENCY} concurrent gateway tasks active"
+                    else:
+                        err_msg = f"Too Many Requests: Maximum {AGY_MAX_CONCURRENCY} concurrent agent tasks active"
                     return self._send_json({
                         "status": "error",
-                        "error": f"Too Many Requests: Maximum {AGY_MAX_CONCURRENCY} concurrent agent tasks active",
+                        "error": err_msg,
                         "status_code": 429,
                     }, status=429)
 
@@ -601,7 +632,7 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
                             "conversation_id": recipient_id,
                         }, status=504)
                 finally:
-                    agent_semaphore.release()
+                    admission_controller.release_execution_permits("agy")
                     conv_lock_mgr.release(recipient_id)
 
             elif path == "/acp/v1/metadata":

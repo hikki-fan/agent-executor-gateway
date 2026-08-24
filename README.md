@@ -4,12 +4,12 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/Version-2.4.0-blue.svg)]()
-[![Status](https://img.shields.io/badge/Status-Phase%204%20Candidate-green.svg)]()
+[![Status](https://img.shields.io/badge/Status-Phase%205%20Candidate-green.svg)]()
 
 High-reliability, executor-neutral **Agent Executor Gateway** providing unified REST API orchestration, session management, and process lifecycle controls for AI coding agents.
 
 > [!NOTE]
-> **Phase 4 Status**: Generic Executor API is operational with both Google Antigravity (`agy`) and Grok Build (`grok`) registered. Legacy ACP API behavior is preserved under the tested compatibility contracts. Multi-executor advanced concurrency scheduling and production gateway migration are planned for Phase 5.
+> **Phase 5 Status**: Generic Executor API is operational with both Google Antigravity (`agy`) and Grok Build (`grok`) registered. Global plus per-executor concurrency controls are implemented under tested contracts. Task verification, routing, and production migration remain future phases.
 
 ---
 
@@ -20,7 +20,7 @@ High-reliability, executor-neutral **Agent Executor Gateway** providing unified 
 - 📊 **Section 10 Standardized Result Contract**: Uniform `ExecutorResult` schema across all executors (`status`, `executor`, `session_id`, `response`, `exit_code`, `timing`, `usage`, `warnings`, `error`, `raw`).
 - 🎯 **Explicit 1:1 Session Isolation**: Stateless gateway routing where clients hold `session_id` (or legacy `conversation_id`). Zero global `agy -c` preemption.
 - 🔒 **Per-Session Concurrency Lock**: Rejects concurrent turns within the same `(executor, session_id)` with `HTTP 409 Conflict` across both Generic and Legacy endpoints.
-- 🛑 **Global Admission Control (HTTP 429)**: Shared executor concurrency semaphore with non-blocking `HTTP 429 Too Many Requests` rejection when saturated.
+- 🛑 **Unified Admission Control (HTTP 429)**: Global `GATEWAY_MAX_CONCURRENCY` plus independent `AGY_MAX_CONCURRENCY` / `GROK_MAX_CONCURRENCY` semaphores reject saturated work immediately with `HTTP 429`.
 - ⏱️ **Flexible Timeout Budgets**: Per-request `timeout_sec` overrides determine both execution deadline and future waiting windows (+5s transport margin), with automatic process group termination (`SIGKILL via os.killpg`).
 - 🔁 **Intelligent Pre-execution Retry**: Retries transient 0-turn startup errors (EOF/network) up to 3 times on new AGY sessions while preserving in-flight errors.
 - 🟡 **Partial-success Preservation**: Contradictory `ERROR` status with usable output is returned as HTTP 200 `partial_success` with warnings and diagnostic details.
@@ -206,7 +206,8 @@ The Gateway maintains full backward compatibility for legacy clients:
 | :--- | :--- | :--- |
 | **Session Model** | Explicit `session_id` / `conversation_id` | Client-held stateless routing; zero `agy -c` preemption |
 | **Session Lock** | `HTTP 409 Conflict` | Protects in-flight turns from concurrent collisions across Generic and Legacy |
-| **Max Concurrency** | `AGY_MAX_CONCURRENCY` (Default `1`)| Enforced by shared bounded semaphore (`HTTP 429` on overflow) |
+| **Gateway Concurrency** | `GATEWAY_MAX_CONCURRENCY` (Default `2`) | Global bounded semaphore across all executors; overflow returns `HTTP 429` |
+| **Executor Concurrency** | `AGY_MAX_CONCURRENCY=1`, `GROK_MAX_CONCURRENCY=1` | Independent per-executor bounded semaphores; overflow returns `HTTP 429` |
 | **Timeout Budget** | Request `timeout_sec` or provider defaults | Monotonic budget; killed via `os.killpg(pgid, SIGKILL)` on expiration |
 | **Transport Margin**| `+5.0 seconds` | Outer Future wait margin over task timeout |
 | **Max HTTP Sockets**| `50` | `45 POST` cap plus `5` general HTTP slots; the final slots are not health-exclusive |

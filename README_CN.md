@@ -4,12 +4,12 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/Version-2.4.0-blue.svg)]()
-[![Status](https://img.shields.io/badge/Status-Phase%204%20Candidate-green.svg)]()
+[![Status](https://img.shields.io/badge/Status-Phase%205%20Candidate-green.svg)]()
 
 高可靠、Executor 中立的 **Agent Executor Gateway**，为 AI 编码 Agent 提供统一 REST API 编排、会话状态隔离与进程生命周期管控。
 
 > [!NOTE]
-> **Phase 4 说明**：当前已完整支持 Generic Executor API，并同时注册 Google Antigravity (`agy`) 与 Grok Build (`grok`) 执行器。旧版 ACP API 行为在已测试兼容契约下保持不变。全局多执行器调度与生产迁移将在 Phase 5 进行。
+> **Phase 5 说明**：当前已完整支持 Generic Executor API，并同时注册 Google Antigravity (`agy`) 与 Grok Build (`grok`) 执行器；全局及执行器级并发控制已在测试契约下生效。任务验证、路由和生产迁移属于后续阶段。
 
 ---
 
@@ -20,7 +20,7 @@
 - 📊 **Section 10 统一结果契约**：所有执行器统一返回 `ExecutorResult` 结构 (`status`, `executor`, `session_id`, `response`, `exit_code`, `timing`, `usage`, `warnings`, `error`, `raw`)。
 - 🎯 **显式 1:1 会话隔离与无状态网关**：客户端持有 `session_id`（或旧版 `conversation_id`），完全杜绝全局 `agy -c` 抢占。
 - 🔒 **单会话并发互斥锁（Per-Session Lock）**：针对同一 `(executor, session_id)` 的并发请求自动返回 `HTTP 409 Conflict`，且跨 Generic 与 Legacy 接口统一生效。
-- 🛑 **全局有界准入控制（HTTP 429）**：共享执行器并发信号量，超额立即返回 `HTTP 429 Too Many Requests`。
+- 🛑 **统一有界准入控制（HTTP 429）**：全局 `GATEWAY_MAX_CONCURRENCY` 与独立的 `AGY_MAX_CONCURRENCY` / `GROK_MAX_CONCURRENCY` 信号量，超额立即返回 `HTTP 429`。
 - ⏱️ **灵活超时预算管理**：支持请求级 `timeout_sec` 超时覆盖，同时控制执行预算与外层等待窗口（+5s 传输余量），超时通过 `os.killpg(pgid, SIGKILL)` 彻底清理进程组。
 - 🔁 **前置异常智能重试**：新会话在 0-turn 启动阶段遇到 transient 错误（EOF/网络重置）自动重试最多 3 次，运行中错误如实保留供客户端决策。
 - 🟡 **部分成功保留**：执行器已生成可用回复但退出状态为非零时返回 HTTP 200 `partial_success`，保留回复及诊断告警。
@@ -204,7 +204,8 @@ curl -s -X POST http://127.0.0.1:8765/v1/executors/grok/invoke \
 | :--- | :--- | :--- |
 | **会话隔离模型** | 显式 `session_id` / `conversation_id` | 客户端持有 ID；完全取消全局 `agy -c` 抢占 |
 | **会话并发互斥** | `HTTP 409 Conflict` | 跨 Generic 与 Legacy 统一互斥保护 |
-| **全局任务上限** | `AGY_MAX_CONCURRENCY` (默认 `1`) | 共享非阻塞信号量门禁，超额返回 `HTTP 429` |
+| **Gateway 全局任务上限** | `GATEWAY_MAX_CONCURRENCY`（默认 `2`） | 覆盖所有执行器的全局有界信号量，超额返回 `HTTP 429` |
+| **执行器任务上限** | `AGY_MAX_CONCURRENCY=1`、`GROK_MAX_CONCURRENCY=1` | 各执行器独立有界信号量，超额返回 `HTTP 429` |
 | **任务执行预算** | 请求 `timeout_sec` 或执行器默认值 | 组合期限到期后通过 `os.killpg(pgid, SIGKILL)` 清理进程组 |
 | **传输等待余量** | `+5.0 秒` | 外层 Future 等待窗口在任务超时上额外增加 5 秒 |
 | **最大连接数** | `50` | `45 POST` + `5 通用` 配额；最后 5 个槽并非 `/health` 专属 |

@@ -35,6 +35,7 @@ FALLBACK_GROK_PATHS = (
 DEFAULT_GROK_TIMEOUT_SEC = 900
 DEFAULT_GROK_PERMISSION_MODE = "bypassPermissions"
 DEFAULT_GROK_MAX_TURNS = 50
+DEFAULT_GROK_MAX_CONCURRENCY = 1
 # Parent Grok sessions export these; inheriting them would attach gateway
 # turns to the wrong conversation instead of --session-id / --resume.
 INHERITED_SESSION_ENV_KEYS = ("GROK_SESSION_ID", "GROK_AGENT", "GROK_WORKTREE")
@@ -68,6 +69,7 @@ class GrokConfig:
     default_timeout_sec: int = DEFAULT_GROK_TIMEOUT_SEC
     permission_mode: str = DEFAULT_GROK_PERMISSION_MODE
     max_turns: int = DEFAULT_GROK_MAX_TURNS
+    max_concurrency: int = DEFAULT_GROK_MAX_CONCURRENCY
 
     @classmethod
     def from_env(cls) -> GrokConfig:
@@ -78,6 +80,7 @@ class GrokConfig:
         timeout_sec = int(os.environ.get("GROK_AGENT_TIMEOUT_SEC", DEFAULT_GROK_TIMEOUT_SEC))
         permission_mode = os.environ.get("GROK_PERMISSION_MODE", DEFAULT_GROK_PERMISSION_MODE)
         max_turns = int(os.environ.get("GROK_MAX_TURNS", DEFAULT_GROK_MAX_TURNS))
+        max_concurrency = int(os.environ.get("GROK_MAX_CONCURRENCY", DEFAULT_GROK_MAX_CONCURRENCY))
         return cls(
             bin_path=bin_path,
             default_model=model,
@@ -85,6 +88,7 @@ class GrokConfig:
             default_timeout_sec=timeout_sec,
             permission_mode=permission_mode,
             max_turns=max_turns,
+            max_concurrency=max_concurrency,
         )
 
 
