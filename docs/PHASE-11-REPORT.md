@@ -1,6 +1,7 @@
 # Phase 11 Report — Retire Old Bridge
 
-**Agent Executor Gateway (`agent-executor-gateway`)**  
+**Agent Executor Gateway (`agent-executor-gateway`)**
+
 **Completed:** August 24, 2026
 
 ## 1. Outcome
