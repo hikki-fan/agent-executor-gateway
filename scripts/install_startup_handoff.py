@@ -71,6 +71,20 @@ def secure_target(target: Target) -> os.stat_result:
     return info
 
 
+def secure_executable(raw_path: Path, label: str) -> Path:
+    """Reject a direct symlink before converting an executable path to absolute."""
+
+    try:
+        info = raw_path.lstat()
+    except FileNotFoundError as exc:
+        raise HandoffError(f"{label} does not exist: {raw_path}") from exc
+    if stat.S_ISLNK(info.st_mode):
+        raise HandoffError(f"{label} is a symbolic link: {raw_path}")
+    if not stat.S_ISREG(info.st_mode) or not os.access(raw_path, os.X_OK):
+        raise HandoffError(f"{label} must be a regular executable: {raw_path}")
+    return raw_path.absolute()
+
+
 def entrypoint_block(cli: Path, watchdog: Path, token: Path, runtime: Path) -> str:
     return (
         "# AGENT_EXECUTOR_GATEWAY_STARTUP_HANDOFF\n"
@@ -252,14 +266,10 @@ def main() -> int:
     profile = Target(Path(args.profile), "Shell profile")
     entry_info = secure_target(entrypoint)
     profile_info = secure_target(profile)
-    cli = Path(args.gateway_cli).resolve()
-    watchdog = Path(args.gateway_watchdog).resolve()
+    cli = secure_executable(Path(args.gateway_cli), "new gateway client")
+    watchdog = secure_executable(Path(args.gateway_watchdog), "new gateway watchdog")
     token = Path(args.token_file)
     runtime = Path(args.runtime_dir)
-    if not cli.is_file() or cli.is_symlink() or not os.access(cli, os.X_OK):
-        raise HandoffError(f"new gateway client must be a regular executable: {cli}")
-    if not watchdog.is_file() or watchdog.is_symlink() or not os.access(watchdog, os.X_OK):
-        raise HandoffError(f"new gateway watchdog must be a regular executable: {watchdog}")
     if token.is_symlink():
         raise HandoffError(f"gateway token file is a symbolic link: {token}")
     if runtime.is_symlink():

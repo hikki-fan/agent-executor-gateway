@@ -154,6 +154,20 @@ exec tail -f /dev/null
         self.assertEqual(result.returncode, 1)
         self.assertIn("symbolic link", result.stderr)
 
+    def test_symlink_gateway_artifact_is_rejected_before_resolve(self):
+        cli_link = self.temp_dir / "gateway-cli-link"
+        watchdog_link = self.temp_dir / "gateway-watchdog-link"
+        cli_link.symlink_to(self.repo / "acp-cli")
+        watchdog_link.symlink_to(self.repo / "scripts" / "gateway_watchdog.sh")
+
+        result_cli = self.run_installer("--check", "--gateway-cli", str(cli_link))
+        self.assertEqual(result_cli.returncode, 1)
+        self.assertIn("new gateway client is a symbolic link", result_cli.stderr)
+
+        result_watchdog = self.run_installer("--check", "--gateway-watchdog", str(watchdog_link))
+        self.assertEqual(result_watchdog.returncode, 1)
+        self.assertIn("new gateway watchdog is a symbolic link", result_watchdog.stderr)
+
     def test_profile_without_legacy_hook_can_be_extended(self):
         self.profile.write_text("export PATH=\"$HOME/bin:$PATH\"\n", encoding="utf-8")
         os.chmod(self.profile, 0o644)

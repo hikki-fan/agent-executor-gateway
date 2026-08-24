@@ -34,7 +34,7 @@ The migration tool defaults to a read-only preflight. It does not edit `/usr/loc
    - Applying requires `--apply`, `--confirm-startup-handoff`, and `CONFIRM_STARTUP_HANDOFF=1`.
    - Creates a private timestamped backup, atomically replaces both files, and restores an already-written file if the second replacement fails.
 4. [`tests/test_phase10_migration.py`](../tests/test_phase10_migration.py) and [`tests/test_startup_handoff.py`](../tests/test_startup_handoff.py)
-   - 37 deterministic migration/handoff tests, including token alignment, startup-hook rejection, graceful-budget validation, watchdog isolation guards, read-only preflight, exact process identity, isolated cutover/rollback, atomic startup rewrites, backups, symlink rejection, confirmation gates, and transactional restore on write failure.
+   - 38 deterministic migration/handoff tests, including token alignment, startup-hook rejection, graceful-budget validation, watchdog isolation guards, read-only preflight, exact process identity, isolated cutover/rollback, atomic startup rewrites, backups, symlink rejection (including source artifacts), confirmation gates, and transactional restore on write failure.
 
 ## 3. Safety gates
 
@@ -78,9 +78,9 @@ The live preflight correctly reports that the current entrypoint still launches 
 
 The following checks were run after the hardening changes:
 
-* `python3 -m unittest discover -s . -v`: **277 tests passed, 3 opt-in tests skipped**.
+* `python3 -m unittest discover -s . -v`: **278 tests passed, 3 opt-in tests skipped**.
 * `python3 -m unittest tests.test_phase10_migration -q`: **29 tests passed**.
-* `python3 -m unittest tests.test_startup_handoff -q`: **8 tests passed**.
+* `python3 -m unittest tests.test_startup_handoff -q`: **9 tests passed**.
 * `bash -n scripts/migrate_production.sh scripts/gateway_watchdog.sh`: passed.
 * `git diff --check`: passed.
 * Isolated candidate runtime on `8766`: health and executor discovery passed; one real AGY invoke returned `success` and created a file in a disposable `/tmp` workspace.
