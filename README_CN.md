@@ -4,12 +4,12 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/Version-2.5.0-blue.svg)]()
-[![Status](https://img.shields.io/badge/Status-Phase%209%20Candidate-green.svg)]()
+[![Status](https://img.shields.io/badge/Status-Phase%2010%20%E5%80%99%E9%80%89%E8%BF%81%E7%A7%BB%E5%B7%A5%E5%85%B7-green.svg)]()
 
 高可靠、Executor 中立的 **Agent Executor Gateway**，为 AI 编码 Agent 提供统一 REST API 编排、会话状态隔离与进程生命周期管控。
 
 > [!NOTE]
-> **Phase 9 候选实现**：工作树中已加入独立 Git Worktree 隔离管理 (`orchestration/worktree.py`)、Task DAG 与有界并行分发基础设施 (`orchestration/dag.py`)、候选部署管理辅助脚本 (`scripts/migration_candidate.sh`)、回归验证矩阵以及候选端口 `8766` 上的端到端烟测套件。Codex 已独立完成候选验收；生产环境继续由 `antigravity-rest-bridge` (:8765) 承载并享有零停机瞬时回滚窗口。生产正式切换 (Phase 10) 与旧 Bridge 归档 (Phase 11) 属于后续阶段。
+> **Phase 10 候选迁移工具**：工作树中已加入可逆生产迁移工具 (`scripts/migrate_production.sh`)、双因素确认安全门禁 (`--confirm-cutover` + `CONFIRM_PRODUCTION_CUTOVER=1`)、只读 Preflight 巡检、候选实例管理 (`scripts/migration_candidate.sh`)、独立 Git Worktree 隔离管理 (`orchestration/worktree.py`) 与 Task DAG 调度引擎 (`orchestration/dag.py`)。生产环境继续由 `antigravity-rest-bridge` (:8765) 承载且未受任何修改。生产正式切换操作（Phase 10 手动触发）与旧 Bridge 归档（Phase 11）属于需单独授权的后续阶段。
 
 ---
 

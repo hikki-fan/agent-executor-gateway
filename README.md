@@ -4,12 +4,12 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/Version-2.5.0-blue.svg)]()
-[![Status](https://img.shields.io/badge/Status-Phase%209%20Candidate-green.svg)]()
+[![Status](https://img.shields.io/badge/Status-Phase%2010%20Candidate%20Tooling-green.svg)]()
 
 High-reliability, executor-neutral **Agent Executor Gateway** providing unified REST API orchestration, session management, and process lifecycle controls for AI coding agents.
 
 > [!NOTE]
-> **Phase 9 Candidate**: The working tree contains isolated Git Worktree management (`orchestration/worktree.py`), Task DAG & parallel dispatch infrastructure (`orchestration/dag.py`), candidate deployment helper (`scripts/migration_candidate.sh`), regression verification matrices, and live smoke test harnesses on candidate port `8766`. Codex independently validated the candidate; active production continues running on `antigravity-rest-bridge` (:8765) with an instantaneous rollback window. Production cutover (Phase 10) and bridge retirement (Phase 11) remain strictly future phases.
+> **Phase 10 Candidate Tooling**: The working tree contains reversible production migration tooling (`scripts/migrate_production.sh`), two-factor confirmation safety gates (`--confirm-cutover` + `CONFIRM_PRODUCTION_CUTOVER=1`), read-only preflight inspections, candidate lifecycle controls (`scripts/migration_candidate.sh`), isolated Git Worktrees (`orchestration/worktree.py`), and Task DAG dispatch (`orchestration/dag.py`). Active production continues running on `antigravity-rest-bridge` (:8765) completely untouched. Production cutover execution (Phase 10 manual trigger) and legacy bridge retirement (Phase 11) require explicit separate authorizations.
 
 ---
 
