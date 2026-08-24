@@ -7,12 +7,12 @@
 
 * **Repository Name**: `agent-executor-gateway`
 * **Current Phase**: `Phase 10 — Production Migration Tooling & Preflight Infrastructure`
-* **Lifecycle Status**: `Phase 10 Candidate Tooling Complete — Awaiting Codex Independent Review & Authorization`
+* **Lifecycle Status**: `Phase 10 Candidate Tooling Independently Validated and Committed — Production Cutover Authorization Pending`
 * **Production Status**: **NOT MIGRATED (Dry-Run / Preflight Tooling Mode)**
   * Active legacy production bridge on port `8765` is **100% ONLINE, ACTIVE, and UNTOUCHED**.
   * The legacy watchdog process was independently checked and is currently **INACTIVE**; no watchdog was stopped or modified by this phase.
   * Legacy repository at `/workspace/antigravity-rest-bridge` is **100% CLEAN and UNMODIFIED**.
-* **Baseline Commit**: `27c1c0e` (Phase 9 candidate-validation commit; Phase 10 changes remain in the working tree until committed).
+* **Baseline Commit**: `27c1c0e` (Phase 9 candidate-validation parent); **Phase 10 validation commit**: `65c605e` (pushed to `origin/master`).
 * **Deliverables Added in Phase 10**:
   1. [`scripts/migrate_production.sh`](file:///workspace/agent-executor-gateway/scripts/migrate_production.sh): Production migration CLI with mandatory two-factor confirmation gates, watchdog safety overrides, strict NUL `argv[1]` script verification for both server and watchdog, PGID leader verification before group signals, configured runtime path inspections, in-memory syntax verification (zero `__pycache__` writes), fail-closed process resolution, flock concurrency protection, and automated emergency rollback.
   2. [`tests/test_phase10_migration.py`](file:///workspace/agent-executor-gateway/tests/test_phase10_migration.py): Deterministic test suite covering preflight zero mutations (filesystem and `__pycache__`), fail-closed process inspection, two-factor safety refusal gates, exact watchdog path matching, NUL `argv[1]` script path validation for both server and watchdog (rejecting `bash -c ...` and `python -c ...`), PGID leader vs non-leader signaling safety, configured runtime path inspections, rollback refusal on occupied/unknown ports, and sandbox cutover/rollback lifecycle on isolated ports.
