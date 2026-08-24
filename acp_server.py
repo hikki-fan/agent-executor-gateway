@@ -152,12 +152,14 @@ def build_agy_command(
     conversation_id: str | None = None,
     model: str | None = None,
     effort: str | None = None,
+    cwd: str | None = None,
 ) -> list[str]:
     return agy_adapter.build_command(
         prompt=prompt,
         conversation_id=conversation_id,
         model=model,
         effort=effort,
+        cwd=cwd,
     )
 
 

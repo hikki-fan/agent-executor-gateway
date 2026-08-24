@@ -186,6 +186,33 @@ class TestAntigravityCommandBuilder(unittest.TestCase):
         self.assertIn("--effort", cmd)
         self.assertEqual(cmd[cmd.index("--effort") + 1], "   ")
 
+    def test_06b_cwd_flag_added_as_add_dir(self):
+        target_dir = "/tmp/my-workspace"
+        cmd = self.adapter.build_command(
+            prompt="Test workspace cwd",
+            cwd=target_dir,
+            model="flash",
+        )
+        self.assertIn("--add-dir", cmd)
+        dir_idx = cmd.index("--add-dir")
+        self.assertEqual(cmd[dir_idx + 1], os.path.realpath(target_dir))
+
+        # Must precede -p
+        p_idx = cmd.index("-p")
+        self.assertLess(dir_idx, p_idx)
+
+    def test_06c_no_cwd_omits_add_dir(self):
+        # None cwd -> no --add-dir
+        cmd_none = self.adapter.build_command(prompt="No cwd", cwd=None)
+        self.assertNotIn("--add-dir", cmd_none)
+
+        # Empty string cwd -> no --add-dir
+        cmd_empty = self.adapter.build_command(prompt="Empty cwd", cwd="")
+        self.assertNotIn("--add-dir", cmd_empty)
+
+        cmd_whitespace = self.adapter.build_command(prompt="Whitespace cwd", cwd="   ")
+        self.assertNotIn("--add-dir", cmd_whitespace)
+
 
 class TestDeterministicRunnerDispatch(unittest.TestCase):
     """Verify that a TypeError raised inside a runner propagates without duplicate execution."""
@@ -253,6 +280,41 @@ class TestAntigravityAdapterInvoke(unittest.TestCase):
         )
         self.assertNotIn("thinking_tokens", result.usage)
         self.assertEqual(result.raw["parsed"]["usage"]["thinking_tokens"], 30)
+
+    def test_08b_invoke_with_cwd_passes_both_add_dir_and_runner_cwd(self):
+        cid = "cid-cwd-1234"
+        mock_output = {
+            "conversation_id": cid,
+            "status": "SUCCESS",
+            "response": "Created file in cwd.",
+            "num_turns": 1,
+        }
+
+        captured_cmd = None
+        captured_cwd = None
+
+        def mock_runner(cmd, timeout, env=None, cwd=None):
+            nonlocal captured_cmd, captured_cwd
+            captured_cmd = list(cmd)
+            captured_cwd = cwd
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout=json.dumps(mock_output),
+                stderr="",
+            )
+
+        adapter = AntigravityAdapter(runner=mock_runner, bin_path="agy")
+        result = adapter.invoke(
+            prompt="Create file",
+            cwd="/tmp/target-cwd-dir",
+        )
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(captured_cwd, "/tmp/target-cwd-dir")
+        self.assertIn("--add-dir", captured_cmd)
+        dir_idx = captured_cmd.index("--add-dir")
+        self.assertEqual(captured_cmd[dir_idx + 1], os.path.realpath("/tmp/target-cwd-dir"))
         self.assertEqual(result.warnings, [])
         self.assertIsNone(result.error)
         self.assertEqual(result.raw["parsed"], mock_output)

@@ -3,18 +3,19 @@
 [English](./README.md) | **中文文档**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/Version-2.4.0-blue.svg)]()
-[![Status](https://img.shields.io/badge/Status-Phase%208%20Candidate-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-2.5.0-blue.svg)]()
+[![Status](https://img.shields.io/badge/Status-Phase%209%20Candidate-green.svg)]()
 
 高可靠、Executor 中立的 **Agent Executor Gateway**，为 AI 编码 Agent 提供统一 REST API 编排、会话状态隔离与进程生命周期管控。
 
 > [!NOTE]
-> **Phase 8 候选实现**：工作树中已加入独立 Git Worktree 隔离管理 (`orchestration/worktree.py`)、Task DAG 与有界并行分发基础设施 (`orchestration/dag.py`)、`depends_on` 依赖校验、规则路由、多执行器升级、机器验证、范围控制、完成报告与指标，以及对应的 `agentctl` 命令。Codex 独立验收仍待完成；生产迁移与上线 (Phase 9/10) 属于后续阶段。
+> **Phase 9 候选实现**：工作树中已加入独立 Git Worktree 隔离管理 (`orchestration/worktree.py`)、Task DAG 与有界并行分发基础设施 (`orchestration/dag.py`)、候选部署管理辅助脚本 (`scripts/migration_candidate.sh`)、回归验证矩阵以及候选端口 `8766` 上的端到端烟测套件。Codex 已独立完成候选验收；生产环境继续由 `antigravity-rest-bridge` (:8765) 承载并享有零停机瞬时回滚窗口。生产正式切换 (Phase 10) 与旧 Bridge 归档 (Phase 11) 属于后续阶段。
 
 ---
 
 ## 🌟 核心特性
 
+- 🚀 **双端口共存迁移候选 (Phase 9)**：提供候选管理脚本 (`scripts/migration_candidate.sh`) 并在候选端口 `8766` 上独立管理 PID、日志与 `0600` Token，支持在不干扰生产环境（`antigravity-rest-bridge` 运行于 `:8765`）的前提下进行实战验证与回归测试。
 - 🌿 **独立 Git Worktree 隔离管控 (Phase 8)**：Executor 中立的 Worktree 管理模块 (`orchestration/worktree.py`)，支持安全根目录限制 (`<repo_parent>/.agent-worktrees/`)、规范化分支命名 (`agent/<sanitized-task-id>-<executor>`)、严格路径逃逸防护以及基于 `git worktree remove` 和 prune 的安全清理。
 - 🌳 **Task DAG 与有界并行分发 (Phase 8)**：依赖感知的 DAG 调度引擎 (`orchestration/dag.py`)，支持 `depends_on` 校验、环路检测、`READY` / `BLOCKED` 状态自动判定，以及独立任务跨 Worktree 的有界并发分发（例如 AGY Task-A 与 Grok Task-B 同时在两个独立 worktree 执行），严禁未经评审的自动合并。
 - 🧭 **基于规则的任务路由 (Phase 7)**：实现 Section 22 确定性路由逻辑 (`orchestration/router.py`)：

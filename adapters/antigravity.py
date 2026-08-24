@@ -128,15 +128,19 @@ class AntigravityAdapter(ExecutorAdapter):
         conversation_id: str | None = None,
         model: str | None = None,
         effort: str | None = None,
+        cwd: str | None = None,
     ) -> list[str]:
         """
         Construct agy CLI command with exact Phase 0 flag truthiness and ordering:
         All configuration flags precede `-p <prompt>`. The prompt is strictly the final argument.
+        If cwd is provided, adds `--add-dir <realpath(cwd)>` to scope the workspace directory.
         """
         cmd = [self.bin_path]
         if conversation_id:
             cmd.extend(["--conversation", str(conversation_id)])
         cmd.extend(["--output-format", "json", "--dangerously-skip-permissions"])
+        if cwd and str(cwd).strip():
+            cmd.extend(["--add-dir", os.path.realpath(str(cwd).strip())])
         if model:
             cmd.extend(["--model", str(model)])
         if effort:
@@ -308,6 +312,7 @@ class AntigravityAdapter(ExecutorAdapter):
             conversation_id=session_id,
             model=model,
             effort=effort,
+            cwd=cwd,
         )
 
         res, parsed = self.execute_with_retry(

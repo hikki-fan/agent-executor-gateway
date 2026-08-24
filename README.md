@@ -3,18 +3,19 @@
 **English** | [中文文档](./README_CN.md)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/Version-2.4.0-blue.svg)]()
-[![Status](https://img.shields.io/badge/Status-Phase%208%20Candidate-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-2.5.0-blue.svg)]()
+[![Status](https://img.shields.io/badge/Status-Phase%209%20Candidate-green.svg)]()
 
 High-reliability, executor-neutral **Agent Executor Gateway** providing unified REST API orchestration, session management, and process lifecycle controls for AI coding agents.
 
 > [!NOTE]
-> **Phase 8 Candidate**: The working tree contains isolated Git Worktree management (`orchestration/worktree.py`), Task DAG & parallel dispatch infrastructure (`orchestration/dag.py`), schema `depends_on` validation, rule-based routing, multi-executor escalation, machine verification, scope control, completion reports & metrics, and the corresponding `agentctl` commands. Codex independent acceptance is pending; production gateway cutover (Phase 9/10) remains a future phase.
+> **Phase 9 Candidate**: The working tree contains isolated Git Worktree management (`orchestration/worktree.py`), Task DAG & parallel dispatch infrastructure (`orchestration/dag.py`), candidate deployment helper (`scripts/migration_candidate.sh`), regression verification matrices, and live smoke test harnesses on candidate port `8766`. Codex independently validated the candidate; active production continues running on `antigravity-rest-bridge` (:8765) with an instantaneous rollback window. Production cutover (Phase 10) and bridge retirement (Phase 11) remain strictly future phases.
 
 ---
 
 ## 🌟 Key Features
 
+- 🚀 **Migration Candidate Coexistence (Phase 9)**: Candidate deployment helper (`scripts/migration_candidate.sh`) managing isolated PID, log, and `0600` token on candidate port `8766`, allowing live verification in parallel with active production (`antigravity-rest-bridge` on `:8765`) without production interference.
 - 🌿 **Isolated Git Worktree Management (Phase 8)**: Executor-neutral worktree orchestration (`orchestration/worktree.py`) with designated safe root containment (`<repo_parent>/.agent-worktrees/`), fixed branch naming (`agent/<sanitized-task-id>-<executor>`), strict path traversal prevention, and safe removal via `git worktree remove` and prune.
 - 🌳 **Task DAG & Parallel Dispatch (Phase 8)**: Dependency-aware DAG engine (`orchestration/dag.py`) supporting `depends_on` validation, cycle detection, automatic `READY` / `BLOCKED` state evaluation, and bounded parallel dispatch of independent tasks across worktrees (e.g. AGY Task-A + Grok Task-B simultaneously) without unreviewed automatic merges.
 - 🧭 **Rule-Based Task Router (Phase 7)**: Deterministic executor routing (`orchestration/router.py`) implementing Goal Prompt Section 22:
