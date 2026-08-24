@@ -11,6 +11,8 @@ High-reliability, executor-neutral **Agent Executor Gateway** providing unified 
 > [!NOTE]
 > **Phase 10 Candidate Tooling**: The working tree contains reversible production migration tooling (`scripts/migrate_production.sh`), two-factor confirmation safety gates (`--confirm-cutover` + `CONFIRM_PRODUCTION_CUTOVER=1`), read-only preflight inspections, a candidate persistent supervisor (`scripts/gateway_watchdog.sh`), candidate lifecycle controls (`scripts/migration_candidate.sh`), isolated Git Worktrees (`orchestration/worktree.py`), and Task DAG dispatch (`orchestration/dag.py`). Preflight also blocks cutover until persistent startup wiring points to the new supervisor. Active production continues running on `antigravity-rest-bridge` (:8765) completely untouched. Production cutover execution (Phase 10 manual trigger) and legacy bridge retirement (Phase 11) require explicit separate authorizations.
 
+The optional startup handoff helper (`scripts/install_startup_handoff.py`) is read-only by default. Applying it requires `--apply`, `--confirm-startup-handoff`, and `CONFIRM_STARTUP_HANDOFF=1`; it creates private backups and atomically updates the entrypoint/profile only after those confirmations.
+
 ---
 
 ## 🌟 Key Features

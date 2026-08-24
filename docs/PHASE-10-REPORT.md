@@ -29,8 +29,12 @@ The migration tool defaults to a read-only preflight. It does not edit `/usr/loc
    - Candidate persistent supervisor for the new gateway.
    - Singleton lock, detached child launch, secure runtime files, strict process identity, health probing, and no killing of unknown listeners.
    - It is **not installed or started** by this phase.
-3. [`tests/test_phase10_migration.py`](../tests/test_phase10_migration.py)
-   - 29 deterministic migration tests, including token alignment, startup-hook rejection, graceful-budget validation, watchdog isolation guards, read-only preflight, exact process identity, and isolated cutover/rollback.
+3. [`scripts/install_startup_handoff.py`](../scripts/install_startup_handoff.py)
+   - Default read-only renderer for the container entrypoint and shell profile.
+   - Applying requires `--apply`, `--confirm-startup-handoff`, and `CONFIRM_STARTUP_HANDOFF=1`.
+   - Creates a private timestamped backup, atomically replaces both files, and restores an already-written file if the second replacement fails.
+4. [`tests/test_phase10_migration.py`](../tests/test_phase10_migration.py) and [`tests/test_startup_handoff.py`](../tests/test_startup_handoff.py)
+   - 37 deterministic migration/handoff tests, including token alignment, startup-hook rejection, graceful-budget validation, watchdog isolation guards, read-only preflight, exact process identity, isolated cutover/rollback, atomic startup rewrites, backups, symlink rejection, confirmation gates, and transactional restore on write failure.
 
 ## 3. Safety gates
 
@@ -74,20 +78,22 @@ The live preflight correctly reports that the current entrypoint still launches 
 
 The following checks were run after the hardening changes:
 
-* `python3 -m unittest discover -s . -v`: **269 tests passed, 3 opt-in tests skipped**.
+* `python3 -m unittest discover -s . -v`: **277 tests passed, 3 opt-in tests skipped**.
 * `python3 -m unittest tests.test_phase10_migration -q`: **29 tests passed**.
+* `python3 -m unittest tests.test_startup_handoff -q`: **8 tests passed**.
 * `bash -n scripts/migrate_production.sh scripts/gateway_watchdog.sh`: passed.
 * `git diff --check`: passed.
 * Isolated candidate runtime on `8766`: health and executor discovery passed; one real AGY invoke returned `success` and created a file in a disposable `/tmp` workspace.
 * Grok live disposable smoke (create/resume `hello.txt`): **passed** in 17.995s with `GROK_HOME=/home/codex/.grok`.
 * A repeat of the dedicated AGY cwd regression was blocked by the upstream response `Individual quota reached` (the Gateway correctly returned HTTP 500 with the structured error); this is an account-quota limitation, not a Gateway failure.
 * Live preflight: returned `1` as intended because startup handoff is not installed.
+* The new startup installer was run against the real files in default dry-run mode; it proposed the expected changes and made no filesystem or production changes.
 * Live preflight created no migration runtime directory, changed no legacy file metadata, changed no legacy repository content, and left PID `119` and port `8765` healthy before and after the probe.
 * The candidate was stopped after the smoke checks; port `8766` is closed.
 
 ## 8. Remaining authorized operations
 
-1. Separately authorize and review the startup handoff installation (entrypoint/profile and any required ownership/mode changes).
+1. Separately authorize and review the startup handoff installation (entrypoint/profile and any required ownership/mode changes). The guarded command is `python3 scripts/install_startup_handoff.py --apply --confirm-startup-handoff` with `CONFIRM_STARTUP_HANDOFF=1`.
 2. Re-run live preflight until it passes, then separately authorize the two-factor Phase 10 cutover.
 3. Observe the new gateway and run AGY/Grok regression and a real project task.
 4. Only after a stable observation window, separately authorize Phase 11: stop the old bridge/container integration, add deprecation text, archive the old repository read-only, and remove dual maintenance.
