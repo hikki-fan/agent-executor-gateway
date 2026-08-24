@@ -51,6 +51,8 @@ WATCHDOG_SCRIPT_REAL="$(realpath "$WATCHDOG_SCRIPT" 2>/dev/null || echo "$WATCHD
 # Persistent startup handoff is intentionally inspected, never edited, by this tool.
 GATEWAY_WATCHDOG_SCRIPT="${GATEWAY_WATCHDOG_SCRIPT:-$SCRIPT_DIR/scripts/gateway_watchdog.sh}"
 GATEWAY_WATCHDOG_SCRIPT_REAL="$(realpath "$GATEWAY_WATCHDOG_SCRIPT" 2>/dev/null || echo "$GATEWAY_WATCHDOG_SCRIPT")"
+GATEWAY_CLI_PATH="${GATEWAY_CLI_PATH:-$SCRIPT_DIR/acp-cli}"
+GATEWAY_CLI_PATH_REAL="$(realpath "$GATEWAY_CLI_PATH" 2>/dev/null || echo "$GATEWAY_CLI_PATH")"
 STARTUP_ENTRYPOINT_FILE="${STARTUP_ENTRYPOINT_FILE:-/usr/local/bin/start-codex-container}"
 STARTUP_PROFILE_FILE="${STARTUP_PROFILE_FILE-$HOME/.bashrc}"
 STARTUP_HANDOFF_MARKER="${STARTUP_HANDOFF_MARKER:-AGENT_EXECUTOR_GATEWAY_STARTUP_HANDOFF}"
@@ -209,6 +211,16 @@ check_startup_file() {
         echo "  ✗ Legacy startup hook still present in $label '$path' (acp_watchdog.sh/ensure_acp_bridge.sh)."
         return 1
     fi
+    if [ "$required" -eq 1 ]; then
+        if ! grep -Fq -- "$GATEWAY_CLI_PATH" "$path" && ! grep -Fq -- "$GATEWAY_CLI_PATH_REAL" "$path"; then
+            echo "  ✗ Container entrypoint '$path' does not restore the new gateway client '$GATEWAY_CLI_PATH_REAL'."
+            return 1
+        fi
+        if grep -Eq '/workspace/(scripts|antigravity-rest-bridge)/acp-cli([[:space:]"'"'"'/]|$)' "$path"; then
+            echo "  ✗ Legacy acp-cli restoration remains in container entrypoint '$path'."
+            return 1
+        fi
+    fi
     if ! grep -Fq -- "$STARTUP_HANDOFF_MARKER" "$path" || \
        { ! grep -Fq -- "$GATEWAY_WATCHDOG_SCRIPT" "$path" && ! grep -Fq -- "$GATEWAY_WATCHDOG_SCRIPT_REAL" "$path"; }; then
         echo "  ✗ Startup handoff incomplete: $label '$path' must contain marker '$STARTUP_HANDOFF_MARKER' and the new watchdog path '$GATEWAY_WATCHDOG_SCRIPT_REAL'."
@@ -226,6 +238,12 @@ check_startup_handoff() {
         passed=0
     else
         echo "  ✓ New gateway watchdog candidate is regular and executable."
+    fi
+    if [ -L "$GATEWAY_CLI_PATH" ] || [ ! -f "$GATEWAY_CLI_PATH" ] || [ ! -x "$GATEWAY_CLI_PATH" ]; then
+        echo "  ✗ New gateway client is missing, non-executable, or a symbolic link: $GATEWAY_CLI_PATH"
+        passed=0
+    else
+        echo "  ✓ New gateway client is regular and executable."
     fi
 
     check_startup_file "$STARTUP_ENTRYPOINT_FILE" "Container entrypoint" 1 || passed=0

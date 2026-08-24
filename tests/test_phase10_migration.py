@@ -597,7 +597,8 @@ server.serve_forever()
         self.startup_entrypoint = os.path.join(self.test_dir, "start-codex-container")
         self.startup_profile = os.path.join(self.test_dir, "bashrc")
         gateway_watchdog = os.path.join(os.path.dirname(self.script_path), "gateway_watchdog.sh")
-        handoff = f"# AGENT_EXECUTOR_GATEWAY_STARTUP_HANDOFF\nsetsid {gateway_watchdog} </dev/null >/dev/null 2>&1 &\n"
+        gateway_cli = os.path.realpath(os.path.join(os.path.dirname(self.script_path), "..", "acp-cli"))
+        handoff = f"# AGENT_EXECUTOR_GATEWAY_STARTUP_HANDOFF\nif [ -x {gateway_cli} ]; then ln -sf {gateway_cli} /usr/local/bin/acp-cli; fi\nsetsid {gateway_watchdog} </dev/null >/dev/null 2>&1 &\n"
         for startup_file in (self.startup_entrypoint, self.startup_profile):
             with open(startup_file, "w") as f:
                 f.write(handoff)

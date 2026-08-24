@@ -65,6 +65,7 @@ The candidate handoff target is [`scripts/gateway_watchdog.sh`](../scripts/gatew
 
 1. The candidate watchdog is a regular executable and not a symlink.
 2. `/usr/local/bin/start-codex-container` exists, is a regular non-group/other-writable file, contains the marker `AGENT_EXECUTOR_GATEWAY_STARTUP_HANDOFF`, and references the candidate watchdog.
+   It must also restore the new repository's `acp-cli`; any legacy `/workspace/scripts/acp-cli` or `/workspace/antigravity-rest-bridge/acp-cli` restoration is rejected.
 3. An existing shell profile (by default `/home/codex/.bashrc`) contains the same handoff and no legacy hook. A missing profile is treated as optional; an insecure or legacy profile fails closed.
 
 The live preflight correctly reports that the current entrypoint still launches the legacy watchdog and that `/home/codex/.bashrc` is mode `0666`. No attempt was made to repair either file because doing so changes container startup behavior and requires explicit authorization.
