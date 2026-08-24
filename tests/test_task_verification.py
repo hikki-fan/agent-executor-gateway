@@ -592,14 +592,14 @@ class TestAgentctlCLI(unittest.TestCase):
         self.assertEqual(res_fail.returncode, 1)
         self.assertIn("Status:       FAILED", res_fail.stdout)
 
-    def test_24_agentctl_task_run_rejected_in_phase_6(self):
+    def test_24_agentctl_task_run_rejected_in_phase_7(self):
         task_path = os.path.join(self.test_dir, "task.json")
         with open(task_path, "w") as f:
             json.dump(get_sample_valid_task_dict(self.test_dir), f)
 
         res = subprocess.run([self.agentctl_bin, "task", "run", task_path], capture_output=True, text=True)
         self.assertEqual(res.returncode, 1)
-        self.assertIn("not implemented in Phase 6", res.stderr)
+        self.assertIn("not implemented", res.stderr)
 
     def test_25_agentctl_executors_and_health(self):
         res_exc = subprocess.run([self.agentctl_bin, "executors", "--json"], capture_output=True, text=True)

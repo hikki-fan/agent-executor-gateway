@@ -1,7 +1,8 @@
 """
-Orchestration Package for Agent Executor Gateway (Phase 6).
+Orchestration Package for Agent Executor Gateway (Phase 6 & 7).
 
-Exports Task schema, verification pipeline, scope control, completion reporting, and metrics.
+Exports Task schema, verification pipeline, scope control, completion reporting, metrics,
+rule-based router, and multi-executor escalation state machine.
 """
 
 from __future__ import annotations
@@ -39,6 +40,20 @@ from orchestration.report import (
     get_git_head_commit,
     record_task_metrics,
 )
+from orchestration.router import (
+    RouteDecision,
+    route_task,
+)
+from orchestration.escalation import (
+    AttemptRecord,
+    EscalationContext,
+    EscalationDecision,
+    EscalationState,
+    build_escalation_context,
+    evaluate_escalation,
+    get_git_diff_text,
+    init_escalation_state,
+)
 
 __all__ = [
     "ALLOWED_COMPLEXITIES",
@@ -66,4 +81,14 @@ __all__ = [
     "get_git_diff_stats",
     "get_git_head_commit",
     "record_task_metrics",
+    "RouteDecision",
+    "route_task",
+    "AttemptRecord",
+    "EscalationContext",
+    "EscalationDecision",
+    "EscalationState",
+    "build_escalation_context",
+    "evaluate_escalation",
+    "get_git_diff_text",
+    "init_escalation_state",
 ]

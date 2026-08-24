@@ -4,22 +4,29 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/Version-2.4.0-blue.svg)]()
-[![Status](https://img.shields.io/badge/Status-Phase%206%20Candidate-green.svg)]()
+[![Status](https://img.shields.io/badge/Status-Phase%207%20Candidate-green.svg)]()
 
 High-reliability, executor-neutral **Agent Executor Gateway** providing unified REST API orchestration, session management, and process lifecycle controls for AI coding agents.
 
 > [!NOTE]
-> **Phase 6 Status**: Task Schema validation, Machine Verification pipeline (`orchestration/verifier.py`), Scope Control (`orchestration/scope.py`), Completion Report & Metrics (`orchestration/report.py`), and `agentctl` CLI commands (`task validate`, `task verify`) are operational. Task routing/escalation (Phase 7) and production gateway cutover remain future phases.
+> **Phase 7 Status**: Rule-based Routing (`orchestration/router.py`), Multi-Executor Escalation state machine (`orchestration/escalation.py`), Escalation Context passing with credential redaction, Task Schema validation, Machine Verification pipeline, Scope Control, Completion Reports & Metrics, and `agentctl` CLI commands (`task validate`, `task verify`, `task route`, `task plan`) are fully operational. Worktree isolation (Phase 8) and production gateway cutover remain future phases.
 
 ---
 
 ## 🌟 Key Features
 
+- 🧭 **Rule-Based Task Router (Phase 7)**: Deterministic executor routing (`orchestration/router.py`) implementing Goal Prompt Section 22:
+  - `S` (Low/High) & `M` (Feature/Bugfix/Refactor) -> `agy`
+  - `M` (Debug/Investigation) -> `grok`
+  - `L` / `XL` -> Manual decomposition / Codex override required (no unvetted execution)
+  - Explicit Codex/executor override takes absolute precedence and validates target executor.
+- 🔄 **Multi-Executor Escalation Engine (Phase 7)**: Bounded turn state machine (`orchestration/escalation.py`) supporting same-executor self-repair (default 2 attempts), executor escalation (e.g. `agy -> grok`, default 1 switch), and loop prevention triggering `REPLAN_REQUIRED` on switch exhaustion.
+- 📦 **Structured & Redacted Escalation Context (Phase 7)**: Goal Prompt Section 27 handover protocol passing original goal, acceptance criteria, base commit, current git diff, changed files, verification commands, failure output, and previous attempts, with automatic Bearer token and secret redaction (`[REDACTED]`).
+- 🛠️ **Unified `agentctl` CLI Tool (Phase 6 & 7)**: Supports `agentctl task validate`, `agentctl task verify`, `agentctl task route`, `agentctl task plan`, `agentctl executors`, `agentctl health`, and `agentctl invoke`.
 - 📋 **Task Schema & Validation (Phase 6)**: Unified, executor-neutral Task JSON model (`orchestration/task.py`) per Goal Prompt Section 18, validating goals, classifications (S/M/L/XL complexity, risk, type), execution params, scopes, acceptance criteria, and verification commands.
 - 🧪 **Machine Verification Pipeline (Phase 6)**: Safe declared command runner (`orchestration/verifier.py`) with `shell=False` execution, `cwd` containment, process-group timeout termination (`os.killpg`), log sanitization/redaction, and concise tail output extraction.
 - 🛡️ **Strict Scope Control (Phase 6)**: Git-based scope checking (`orchestration/scope.py`) validating committed, staged, unstaged, and untracked files against `allowed_paths` and `forbidden_paths` globs.
 - 📊 **Standardized Completion Report & Metrics (Phase 6)**: Section 30 JSON Completion Reports with Git diff statistics and Section 38 `.agent/metrics.jsonl` structured metric append.
-- 🛠️ **`agentctl` CLI Tool (Phase 6)**: Unified CLI supporting `agentctl task validate`, `agentctl task verify`, `agentctl executors`, `agentctl health`, and `agentctl invoke`.
 - 🌐 **Unified Generic Executor API (Phase 2 & 4)**: Standardized executor discovery (`GET /v1/executors`), health checks (`GET /v1/executors/{executor}/health`), and invocation (`POST /v1/executors/{executor}/invoke`).
 - 🤖 **Multi-Provider Support**: Supports both Google Antigravity (`agy`) and Grok Build (`grok`) headless CLI runtimes.
 - 📊 **Section 10 Standardized Result Contract**: Uniform `ExecutorResult` schema across all executors (`status`, `executor`, `session_id`, `response`, `exit_code`, `timing`, `usage`, `warnings`, `error`, `raw`).
@@ -205,35 +212,37 @@ The Gateway maintains full backward compatibility for legacy clients:
 
 ---
 
-## 🛠️ `agentctl` CLI Reference (Phase 6)
+## 🛠️ `agentctl` CLI Reference (Phase 6 & 7)
 
-The repository provides the `agentctl` command-line utility for task validation, verification, and executor inspection:
+The repository provides the `agentctl` command-line utility for task validation, verification, routing, planning, and executor inspection:
 
 ### 1. Task Validation
 Validate Task JSON schema without executing commands:
 ```bash
 ./agentctl task validate .agent/tasks/TASK-001.json
 ```
-Output:
-```text
-Task validation PASSED: '.agent/tasks/TASK-001.json'
-  Task ID:        TASK-001
-  Goal:           增加 Telegram 下载任务取消功能
-  Executor:       agy
-  Complexity:     M
-  Risk:           medium
-  Repository:     /workspace/project (base_commit=abc1234)
-  Scope:          allowed=2, forbidden=1
-  Verification:   2 commands declared
+
+### 2. Rule-Based Task Routing (Phase 7)
+Determine executor routing based on task complexity, type, and risk:
+```bash
+./agentctl task route .agent/tasks/TASK-001.json
+# With explicit Codex override:
+./agentctl task route .agent/tasks/TASK-001.json --override grok
 ```
 
-### 2. Task Verification Pipeline
+### 3. Execution & Escalation Planning (Phase 7)
+Display the end-to-end routing decision, fallback chain, attempt budgets, and scope bounds:
+```bash
+./agentctl task plan .agent/tasks/TASK-001.json
+```
+
+### 4. Task Verification Pipeline (Phase 6)
 Run machine verification commands and check Git scope boundaries:
 ```bash
 ./agentctl task verify .agent/tasks/TASK-001.json --json
 ```
 
-### 3. Executor & Health Probe
+### 5. Executor & Health Probe
 ```bash
 ./agentctl executors
 ./agentctl health

@@ -2,9 +2,11 @@
 """
 agentctl — CLI Management and Task Orchestration Tool for Agent Executor Gateway.
 
-Supported commands per Goal Prompt Section 39 & Phase 6:
+Supported commands per Goal Prompt Sections 39, 48, 49:
 - agentctl task validate TASK.json
 - agentctl task verify TASK.json [--repo PATH] [--log-dir DIR] [--timeout SEC]
+- agentctl task route TASK.json [--override EXECUTOR] [--json]
+- agentctl task plan TASK.json [--override EXECUTOR] [--json]
 - agentctl executors
 - agentctl health
 - agentctl invoke <executor> --cwd <CWD> --prompt <PROMPT> [--session-id <ID>]
@@ -26,6 +28,7 @@ if SCRIPT_DIR not in sys.path:
 from orchestration.task import load_and_validate_task, validate_task_dict
 from orchestration.verifier import verify_task
 from orchestration.report import generate_completion_report, record_task_metrics
+from orchestration.router import route_task, RouteDecision
 
 
 def cmd_task_validate(args: argparse.Namespace) -> int:
@@ -136,6 +139,105 @@ def cmd_task_verify(args: argparse.Namespace) -> int:
     return 0 if verif_result.status == "passed" else 1
 
 
+def cmd_task_route(args: argparse.Namespace) -> int:
+    """Run rule-based routing on a Task and output routing decision."""
+    filepath = args.task_file
+    if not os.path.exists(filepath):
+        print(f"Error: Task file not found: '{filepath}'", file=sys.stderr)
+        return 1
+
+    task, errors = load_and_validate_task(filepath)
+    if errors or task is None:
+        print(f"Error: Cannot route invalid task file '{filepath}':", file=sys.stderr)
+        for err in errors:
+            print(f"  - {err}", file=sys.stderr)
+        return 1
+
+    decision = route_task(task, executor_override=args.override)
+
+    if args.json:
+        print(json.dumps(decision.to_dict(), indent=2, ensure_ascii=False))
+    else:
+        print(f"=== Task Routing Decision: {task.task_id} ===")
+        print(f"Status:       {decision.status.upper()}")
+        print(f"Executor:     {decision.executor or '(None)'}")
+        print(f"Rule:         {decision.rule}")
+        print(f"Complexity:   {decision.complexity} (risk={decision.risk}, type={decision.task_type})")
+        print(f"Review Req:   {decision.requires_human_review}")
+        print(f"Reason:       {decision.reason}")
+
+    return 0 if decision.status == "routed" else 1
+
+
+def cmd_task_plan(args: argparse.Namespace) -> int:
+    """Compute and display the end-to-end execution and escalation plan for a Task."""
+    filepath = args.task_file
+    if not os.path.exists(filepath):
+        print(f"Error: Task file not found: '{filepath}'", file=sys.stderr)
+        return 1
+
+    task, errors = load_and_validate_task(filepath)
+    if errors or task is None:
+        print(f"Error: Cannot plan invalid task file '{filepath}':", file=sys.stderr)
+        for err in errors:
+            print(f"  - {err}", file=sys.stderr)
+        return 1
+
+    decision = route_task(task, executor_override=args.override)
+
+    primary_executor = decision.executor or task.execution.executor
+    fallback_executor = task.execution.fallback_executor or ("grok" if primary_executor == "agy" else "agy")
+
+    plan = {
+        "task_id": task.task_id,
+        "goal": task.goal,
+        "classification": {
+            "complexity": task.classification.complexity,
+            "risk": task.classification.risk,
+            "type": task.classification.type,
+        },
+        "routing": {
+            "decision": decision.to_dict(),
+            "primary_executor": primary_executor,
+            "fallback_executor": fallback_executor,
+        },
+        "escalation_policy": {
+            "max_same_executor_attempts": task.execution.max_same_executor_attempts,
+            "max_executor_switches": task.execution.max_executor_switches,
+            "max_replans": 1,
+            "escalation_chain": [
+                f"{primary_executor} (attempt 1)",
+                f"{primary_executor} self-repair (attempt 2)",
+                f"{fallback_executor} escalation (attempt 1)",
+                f"{fallback_executor} self-repair (attempt 2)",
+                "REPLAN_REQUIRED (Codex intervention)",
+            ],
+        },
+        "scope": {
+            "allowed_paths": task.scope.allowed_paths,
+            "forbidden_paths": task.scope.forbidden_paths,
+        },
+        "verification_commands": task.verification.commands,
+    }
+
+    if args.json:
+        print(json.dumps(plan, indent=2, ensure_ascii=False))
+    else:
+        print(f"=== Task Execution Plan: {task.task_id} ===")
+        print(f"Goal:                 {task.goal}")
+        print(f"Classification:       {task.classification.complexity} complexity | {task.classification.risk} risk | {task.classification.type}")
+        print(f"Initial Executor:     {primary_executor} (Rule: {decision.rule})")
+        print(f"Fallback Executor:    {fallback_executor}")
+        print(f"Attempts Budget:      {task.execution.max_same_executor_attempts} same-executor attempts")
+        print(f"Switches Budget:      {task.execution.max_executor_switches} switch(es)")
+        print(f"Escalation Chain:     {' -> '.join(plan['escalation_policy']['escalation_chain'])}")
+        print(f"Verification Cmds ({len(task.verification.commands)}):")
+        for cmd in task.verification.commands:
+            print(f"  - `{cmd}`")
+
+    return 0 if decision.status == "routed" else 1
+
+
 def cmd_executors(args: argparse.Namespace) -> int:
     """List available and registered executors."""
     try:
@@ -147,10 +249,8 @@ def cmd_executors(args: argparse.Namespace) -> int:
             print("Registered Executors:")
             for exc in executors:
                 status_mark = "✓" if exc.get("available") else "✗"
-                print(
-                    f"  [{status_mark}] {exc.get('name')}: "
-                    f"supports_session={exc.get('supports_session')}"
-                )
+                sess_mark = "yes" if exc.get("supports_session") else "no"
+                print(f"  [{status_mark}] {exc.get('name')}: available={exc.get('available')}, supports_session={sess_mark}")
         return 0
     except Exception as e:
         print(f"Error querying executors: {e}", file=sys.stderr)
@@ -161,12 +261,14 @@ def cmd_health(args: argparse.Namespace) -> int:
     """Probe server and executors health."""
     try:
         from acp_server import executor_registry
+        executors_health = {}
+        for name in executor_registry.registered_names():
+            adapter = executor_registry.get(name)
+            if adapter:
+                executors_health[name] = adapter.health()
         health_data = {
             "status": "online",
-            "executors": {
-                name: executor_registry.get(name).health()
-                for name in executor_registry.registered_names()
-            },
+            "executors": executors_health,
         }
         print(json.dumps(health_data, indent=2))
         return 0
@@ -207,7 +309,7 @@ def main() -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # 1. agentctl task ...
-    task_parser = subparsers.add_parser("task", help="Task management and validation commands")
+    task_parser = subparsers.add_parser("task", help="Task management, routing, and verification commands")
     task_subparsers = task_parser.add_subparsers(dest="task_subcommand", required=True)
 
     # agentctl task validate TASK.json
@@ -226,8 +328,20 @@ def main() -> int:
     ver_parser.add_argument("--skip-scope", action="store_true", help="Skip Git scope boundary checking")
     ver_parser.add_argument("--json", action="store_true", help="Output Completion Report as JSON")
 
-    # agentctl task run TASK.json (Explicitly reject in Phase 6)
-    run_parser = task_subparsers.add_parser("run", help="Run task execution (Phase 7+)")
+    # agentctl task route TASK.json
+    route_parser = task_subparsers.add_parser("route", help="Evaluate rule-based executor routing for a Task")
+    route_parser.add_argument("task_file", help="Path to Task JSON file")
+    route_parser.add_argument("--override", "-o", default=None, choices=["agy", "grok"], help="Explicit executor override")
+    route_parser.add_argument("--json", action="store_true", help="Output routing decision as JSON")
+
+    # agentctl task plan TASK.json
+    plan_parser = task_subparsers.add_parser("plan", help="Display execution and escalation plan for a Task")
+    plan_parser.add_argument("task_file", help="Path to Task JSON file")
+    plan_parser.add_argument("--override", "-o", default=None, choices=["agy", "grok"], help="Explicit executor override")
+    plan_parser.add_argument("--json", action="store_true", help="Output plan as JSON")
+
+    # agentctl task run TASK.json (Explicitly reject in Phase 7/future)
+    run_parser = task_subparsers.add_parser("run", help="Run task execution (Phase 8+)")
     run_parser.add_argument("task_file", help="Path to Task JSON file")
 
     # 2. agentctl executors
@@ -254,9 +368,13 @@ def main() -> int:
             return cmd_task_validate(parsed)
         elif parsed.task_subcommand == "verify":
             return cmd_task_verify(parsed)
+        elif parsed.task_subcommand == "route":
+            return cmd_task_route(parsed)
+        elif parsed.task_subcommand == "plan":
+            return cmd_task_plan(parsed)
         elif parsed.task_subcommand == "run":
             print(
-                "Error: 'agentctl task run' is not implemented in Phase 6 (requires Phase 7+ routing and escalation).",
+                "Error: 'agentctl task run' is not implemented in Phase 7 (autonomous DAG execution is deferred per Goal Prompt).",
                 file=sys.stderr,
             )
             return 1
