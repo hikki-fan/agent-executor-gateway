@@ -4,16 +4,16 @@
 
 ## 1. Current status
 
-* **Phase:** Phase 10 production cutover complete; rollback observation window open.
+* **Phase:** Phase 10 production cutover complete; Phase 11 retirement subsequently completed.
 * **Production:** The new `agent-executor-gateway` serves `127.0.0.1:8765` (PID `21746`) with the unified AGY/Grok API.
 * **Candidate:** Port `8766` is stopped.
-* **Legacy repository:** `/workspace/antigravity-rest-bridge` is clean and untouched.
+* **Legacy repository:** `/workspace/antigravity-rest-bridge` is clean; Phase 11 later added only the deprecation commit `6fe8703` before archiving it.
 * **Watchdog:** [`scripts/gateway_watchdog.sh`](../scripts/gateway_watchdog.sh) is active as PID `22869` with `PPID=1` and no TTY.
 * **Client entry:** `/usr/local/bin/acp-cli` resolves to `/workspace/agent-executor-gateway/acp-cli`; the previous target is recorded in the private migration runtime.
-* **Cutover:** Completed after explicit operator authorization. The rollback state and old client target remain available.
-* **Phase 11:** Old-bridge retirement, repository archiving, and removal of rollback assets are deferred and require separate authorization after stable observation.
+* **Cutover:** Completed after explicit operator authorization. The rollback state and old client target remain available as inactive emergency-recovery assets.
+* **Phase 11:** Completed on August 24, 2026; the old deployment is stopped and its GitHub repository is archived. See [`PHASE-11-REPORT.md`](./PHASE-11-REPORT.md).
 
-The migration tool defaults to a read-only preflight. The guarded startup handoff was installed with a private backup before cutover. The legacy repository was not edited or deleted.
+The migration tool defaults to a read-only preflight. The guarded startup handoff was installed with a private backup before cutover. Phase 10 did not edit or delete the legacy repository; the later Phase 11 deprecation commit is documented separately.
 
 ## 2. Deliverables
 
@@ -92,13 +92,13 @@ The following checks were run after the hardening changes:
 * Global client: `/usr/local/bin/acp-cli` resolves to `/workspace/agent-executor-gateway/acp-cli`; `acp-cli status` returned `0` and the new health payload.
 * Compatibility probes: `/v1/executors` and `/acp/v1/status` both returned `200` from the new process.
 * Production Grok API smoke: create/resume through `/v1/executors/grok/invoke` returned `200` twice and produced the expected final `hello world` file in a disposable `/tmp` workspace.
-* Production AGY API smoke: the new Gateway returned structured HTTP `500` with the upstream `Individual quota reached` error; no file was created. This is an account-quota limitation, not a Gateway routing failure.
+* The first production AGY API smoke returned structured HTTP `500` with the upstream `Individual quota reached` error and created no file. After the quota became available, a new invocation and same-session continuation both returned HTTP `200`; Codex independently verified the sole output file contained exactly `alpha beta`.
 * Post-cutover watchdog: PID `22869`, `PPID=1`, no TTY, singleton lock mode `0600`.
 * The old bridge stopped listening; its former PID `119` is a zombie retained by the container's non-reaping PID 1. No claim is made that historical zombies were reaped.
-* The legacy repository remains clean and untouched; the startup backup preserves the pre-cutover entrypoint/profile and previous client target for the rollback window.
+* The legacy repository remained clean and untouched throughout Phase 10; the startup backup preserves the pre-cutover entrypoint/profile and previous client target. Phase 11 later added only the archived-repository migration notice.
 
-## 8. Remaining authorized operations
+## 8. Phase 10 exit state
 
-1. Keep the rollback window open and observe the new Gateway/watchdog on `:8765`.
-2. After the upstream AGY quota resets, rerun the disposable AGY regression; separately authorize any real project task before modifying project files.
-3. After a stable observation window, separately authorize Phase 11: remove the old bridge/container integration, add deprecation text, archive the old repository read-only, and remove dual maintenance.
+1. Production traffic and the global client use the new Gateway on `:8765`.
+2. AGY and Grok production regressions completed; timeout cleanup and uninterrupted health probing were also observed under a bounded Grok task timeout.
+3. Phase 11 retirement was completed after authorization. Historical rollback files remain private and inactive; the old codebase is no longer a development target.

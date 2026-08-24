@@ -4,12 +4,12 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/Version-2.5.0-blue.svg)]()
-[![Status](https://img.shields.io/badge/Status-Phase%2010%20Cutover%20%2F%20Observation-green.svg)]()
+[![Status](https://img.shields.io/badge/Status-Production%20Gateway-brightgreen.svg)]()
 
 High-reliability, executor-neutral **Agent Executor Gateway** providing unified REST API orchestration, session management, and process lifecycle controls for AI coding agents.
 
 > [!NOTE]
-> **Phase 10 cutover complete / observation window open**: The working tree contains reversible production migration tooling (`scripts/migrate_production.sh`), two-factor confirmation safety gates, read-only preflight inspections, the persistent supervisor (`scripts/gateway_watchdog.sh`), candidate lifecycle controls (`scripts/migration_candidate.sh`), isolated Git Worktrees (`orchestration/worktree.py`), and Task DAG dispatch (`orchestration/dag.py`). The new `agent-executor-gateway` now serves `:8765`; the old bridge repository remains clean and is retained for the rollback window. Legacy bridge retirement and archive (Phase 11) require separate authorization after stable observation.
+> **Production migration complete**: `agent-executor-gateway` is the sole production executor entry on `:8765`, supervised by `scripts/gateway_watchdog.sh`, with both AGY and Grok available through the unified API. The superseded `antigravity-rest-bridge` deployment is stopped and its GitHub repository was archived on August 24, 2026. Private migration backups remain available for emergency recovery, but feature and bug-fix development now happens only here. See the [Phase 11 report](./docs/PHASE-11-REPORT.md).
 
 The optional startup handoff helper (`scripts/install_startup_handoff.py`) is read-only by default. Applying it requires `--apply`, `--confirm-startup-handoff`, and `CONFIRM_STARTUP_HANDOFF=1`; it creates private backups and atomically updates the entrypoint/profile only after those confirmations.
 

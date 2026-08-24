@@ -4,12 +4,12 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/Version-2.5.0-blue.svg)]()
-[![Status](https://img.shields.io/badge/Status-Phase%2010%20%E5%88%87%E6%8D%A2%2F%E8%A7%82%E5%AF%9F-green.svg)]()
+[![Status](https://img.shields.io/badge/Status-%E7%94%9F%E4%BA%A7%20Gateway-brightgreen.svg)]()
 
 高可靠、Executor 中立的 **Agent Executor Gateway**，为 AI 编码 Agent 提供统一 REST API 编排、会话状态隔离与进程生命周期管控。
 
 > [!NOTE]
-> **Phase 10 已完成生产切换，现处于观察窗口**：工作树包含可逆生产迁移工具 (`scripts/migrate_production.sh`)、双因素确认安全门禁、只读 Preflight 巡检、常驻监督器 (`scripts/gateway_watchdog.sh`)、候选实例管理 (`scripts/migration_candidate.sh`)、独立 Git Worktree 隔离管理 (`orchestration/worktree.py`) 与 Task DAG 调度引擎 (`orchestration/dag.py`)。新的 `agent-executor-gateway` 已接管 `:8765`；旧 Bridge 仓库保持干净并在回滚窗口内保留。旧 Bridge 退役与归档（Phase 11）须在稳定观察后另行授权。
+> **生产迁移已完成**：`agent-executor-gateway` 已成为 `:8765` 上唯一的生产 Executor 入口，由 `scripts/gateway_watchdog.sh` 常驻监督，并通过统一 API 提供 AGY 与 Grok。旧 `antigravity-rest-bridge` 部署已停止，其 GitHub 仓库已于 2026 年 8 月 24 日归档。私有迁移备份继续用于紧急恢复，但所有新功能与缺陷修复只在本仓库维护。详见 [Phase 11 报告](./docs/PHASE-11-REPORT.md)。
 
 可选启动交接工具 (`scripts/install_startup_handoff.py`) 默认只读；只有同时提供 `--apply`、`--confirm-startup-handoff` 和 `CONFIRM_STARTUP_HANDOFF=1` 才会执行，并在原子更新入口/profile 前创建私有备份。
 
