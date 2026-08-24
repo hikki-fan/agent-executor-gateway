@@ -4,12 +4,12 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/Version-2.5.0-blue.svg)]()
-[![Status](https://img.shields.io/badge/Status-Phase%2010%20%E5%80%99%E9%80%89%E8%BF%81%E7%A7%BB%E5%B7%A5%E5%85%B7-green.svg)]()
+[![Status](https://img.shields.io/badge/Status-Phase%2010%20%E5%88%87%E6%8D%A2%2F%E8%A7%82%E5%AF%9F-green.svg)]()
 
 高可靠、Executor 中立的 **Agent Executor Gateway**，为 AI 编码 Agent 提供统一 REST API 编排、会话状态隔离与进程生命周期管控。
 
 > [!NOTE]
-> **Phase 10 候选迁移工具**：工作树中已加入可逆生产迁移工具 (`scripts/migrate_production.sh`)、双因素确认安全门禁 (`--confirm-cutover` + `CONFIRM_PRODUCTION_CUTOVER=1`)、只读 Preflight 巡检、候选常驻监督器 (`scripts/gateway_watchdog.sh`)、候选实例管理 (`scripts/migration_candidate.sh`)、独立 Git Worktree 隔离管理 (`orchestration/worktree.py`) 与 Task DAG 调度引擎 (`orchestration/dag.py`)。Preflight 会在持久化启动入口尚未切换到新监督器时阻断正式切换。生产环境继续由 `antigravity-rest-bridge` (:8765) 承载且未受任何修改。生产正式切换操作（Phase 10 手动触发）与旧 Bridge 归档（Phase 11）属于需单独授权的后续阶段。
+> **Phase 10 已完成生产切换，现处于观察窗口**：工作树包含可逆生产迁移工具 (`scripts/migrate_production.sh`)、双因素确认安全门禁、只读 Preflight 巡检、常驻监督器 (`scripts/gateway_watchdog.sh`)、候选实例管理 (`scripts/migration_candidate.sh`)、独立 Git Worktree 隔离管理 (`orchestration/worktree.py`) 与 Task DAG 调度引擎 (`orchestration/dag.py`)。新的 `agent-executor-gateway` 已接管 `:8765`；旧 Bridge 仓库保持干净并在回滚窗口内保留。旧 Bridge 退役与归档（Phase 11）须在稳定观察后另行授权。
 
 可选启动交接工具 (`scripts/install_startup_handoff.py`) 默认只读；只有同时提供 `--apply`、`--confirm-startup-handoff` 和 `CONFIRM_STARTUP_HANDOFF=1` 才会执行，并在原子更新入口/profile 前创建私有备份。
 
@@ -17,7 +17,7 @@
 
 ## 🌟 核心特性
 
-- 🚀 **双端口共存迁移候选 (Phase 9)**：提供候选管理脚本 (`scripts/migration_candidate.sh`) 并在候选端口 `8766` 上独立管理 PID、日志与 `0600` Token，支持在不干扰生产环境（`antigravity-rest-bridge` 运行于 `:8765`）的前提下进行实战验证与回归测试。
+- 🚀 **双端口共存迁移候选 (Phase 9)**：候选管理脚本 (`scripts/migration_candidate.sh`) 在 `8766` 上独立管理 PID、日志与 `0600` Token，已用于完成生产切换前验证，并可在回滚窗口内继续做隔离回归。
 - 🌿 **独立 Git Worktree 隔离管控 (Phase 8)**：Executor 中立的 Worktree 管理模块 (`orchestration/worktree.py`)，支持安全根目录限制 (`<repo_parent>/.agent-worktrees/`)、规范化分支命名 (`agent/<sanitized-task-id>-<executor>`)、严格路径逃逸防护以及基于 `git worktree remove` 和 prune 的安全清理。
 - 🌳 **Task DAG 与有界并行分发 (Phase 8)**：依赖感知的 DAG 调度引擎 (`orchestration/dag.py`)，支持 `depends_on` 校验、环路检测、`READY` / `BLOCKED` 状态自动判定，以及独立任务跨 Worktree 的有界并发分发（例如 AGY Task-A 与 Grok Task-B 同时在两个独立 worktree 执行），严禁未经评审的自动合并。
 - 🧭 **基于规则的任务路由 (Phase 7)**：实现 Section 22 确定性路由逻辑 (`orchestration/router.py`)：

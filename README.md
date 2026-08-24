@@ -4,12 +4,12 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/Version-2.5.0-blue.svg)]()
-[![Status](https://img.shields.io/badge/Status-Phase%2010%20Candidate%20Tooling-green.svg)]()
+[![Status](https://img.shields.io/badge/Status-Phase%2010%20Cutover%20%2F%20Observation-green.svg)]()
 
 High-reliability, executor-neutral **Agent Executor Gateway** providing unified REST API orchestration, session management, and process lifecycle controls for AI coding agents.
 
 > [!NOTE]
-> **Phase 10 Candidate Tooling**: The working tree contains reversible production migration tooling (`scripts/migrate_production.sh`), two-factor confirmation safety gates (`--confirm-cutover` + `CONFIRM_PRODUCTION_CUTOVER=1`), read-only preflight inspections, a candidate persistent supervisor (`scripts/gateway_watchdog.sh`), candidate lifecycle controls (`scripts/migration_candidate.sh`), isolated Git Worktrees (`orchestration/worktree.py`), and Task DAG dispatch (`orchestration/dag.py`). Preflight also blocks cutover until persistent startup wiring points to the new supervisor. Active production continues running on `antigravity-rest-bridge` (:8765) completely untouched. Production cutover execution (Phase 10 manual trigger) and legacy bridge retirement (Phase 11) require explicit separate authorizations.
+> **Phase 10 cutover complete / observation window open**: The working tree contains reversible production migration tooling (`scripts/migrate_production.sh`), two-factor confirmation safety gates, read-only preflight inspections, the persistent supervisor (`scripts/gateway_watchdog.sh`), candidate lifecycle controls (`scripts/migration_candidate.sh`), isolated Git Worktrees (`orchestration/worktree.py`), and Task DAG dispatch (`orchestration/dag.py`). The new `agent-executor-gateway` now serves `:8765`; the old bridge repository remains clean and is retained for the rollback window. Legacy bridge retirement and archive (Phase 11) require separate authorization after stable observation.
 
 The optional startup handoff helper (`scripts/install_startup_handoff.py`) is read-only by default. Applying it requires `--apply`, `--confirm-startup-handoff`, and `CONFIRM_STARTUP_HANDOFF=1`; it creates private backups and atomically updates the entrypoint/profile only after those confirmations.
 
@@ -17,7 +17,7 @@ The optional startup handoff helper (`scripts/install_startup_handoff.py`) is re
 
 ## 🌟 Key Features
 
-- 🚀 **Migration Candidate Coexistence (Phase 9)**: Candidate deployment helper (`scripts/migration_candidate.sh`) managing isolated PID, log, and `0600` token on candidate port `8766`, allowing live verification in parallel with active production (`antigravity-rest-bridge` on `:8765`) without production interference.
+- 🚀 **Migration Candidate Coexistence (Phase 9)**: Candidate deployment helper (`scripts/migration_candidate.sh`) manages isolated PID, log, and `0600` token on candidate port `8766`; this supported the completed cutover and remains available for rollback-oriented verification.
 - 🌿 **Isolated Git Worktree Management (Phase 8)**: Executor-neutral worktree orchestration (`orchestration/worktree.py`) with designated safe root containment (`<repo_parent>/.agent-worktrees/`), fixed branch naming (`agent/<sanitized-task-id>-<executor>`), strict path traversal prevention, and safe removal via `git worktree remove` and prune.
 - 🌳 **Task DAG & Parallel Dispatch (Phase 8)**: Dependency-aware DAG engine (`orchestration/dag.py`) supporting `depends_on` validation, cycle detection, automatic `READY` / `BLOCKED` state evaluation, and bounded parallel dispatch of independent tasks across worktrees (e.g. AGY Task-A + Grok Task-B simultaneously) without unreviewed automatic merges.
 - 🧭 **Rule-Based Task Router (Phase 7)**: Deterministic executor routing (`orchestration/router.py`) implementing Goal Prompt Section 22:
