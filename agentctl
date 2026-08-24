@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """
-agentctl — CLI Management and Task Orchestration Tool for Agent Executor Gateway.
+agentctl — CLI Management, Task Orchestration, and Worktree Tool for Agent Executor Gateway.
 
-Supported commands per Goal Prompt Sections 39, 48, 49:
+Supported commands per Goal Prompt Sections 33, 34, 39, 48, 49, 50:
 - agentctl task validate TASK.json
 - agentctl task verify TASK.json [--repo PATH] [--log-dir DIR] [--timeout SEC]
 - agentctl task route TASK.json [--override EXECUTOR] [--json]
 - agentctl task plan TASK.json [--override EXECUTOR] [--json]
+- agentctl task ready TASK1.json [TASK2.json ...] [--json]
+- agentctl task graph TASK1.json [TASK2.json ...] [--json]
+- agentctl worktree create TASK.json [--root DIR] [--json]
+- agentctl worktree list [--root DIR] [--repo PATH] [--json]
+- agentctl worktree cleanup <task_id | path> [--repo PATH] [--root DIR] [--force]
 - agentctl executors
 - agentctl health
 - agentctl invoke <executor> --cwd <CWD> --prompt <PROMPT> [--session-id <ID>]
@@ -15,6 +20,7 @@ Supported commands per Goal Prompt Sections 39, 48, 49:
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import sys
@@ -25,10 +31,12 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
-from orchestration.task import load_and_validate_task, validate_task_dict
+from orchestration.task import Task, load_and_validate_task, validate_task_dict
 from orchestration.verifier import verify_task
 from orchestration.report import generate_completion_report, record_task_metrics
 from orchestration.router import route_task, RouteDecision
+from orchestration.worktree import WorktreeInfo, WorktreeManager
+from orchestration.dag import TaskDAG, TaskNode
 
 
 def cmd_task_validate(args: argparse.Namespace) -> int:
@@ -57,6 +65,8 @@ def cmd_task_validate(args: argparse.Namespace) -> int:
         print(f"  Repository:     {task.repository.path} (base_commit={task.repository.base_commit})")
         print(f"  Scope:          allowed={len(task.scope.allowed_paths)}, forbidden={len(task.scope.forbidden_paths)}")
         print(f"  Verification:   {len(task.verification.commands)} commands declared")
+        if task.depends_on:
+            print(f"  Depends On:     {', '.join(task.depends_on)}")
     return 0
 
 
@@ -238,6 +248,165 @@ def cmd_task_plan(args: argparse.Namespace) -> int:
     return 0 if decision.status == "routed" else 1
 
 
+def _collect_tasks(paths: list[str]) -> tuple[list[Task], list[str]]:
+    """Collect and validate tasks from files or directories without duplicates."""
+    tasks: list[Task] = []
+    errors: list[str] = []
+    seen_files: set[str] = set()
+    seen_ids: set[str] = set()
+
+    expanded_files: list[str] = []
+    for p in paths:
+        if os.path.isdir(p):
+            for pattern in ("*.json",):
+                expanded_files.extend(sorted(glob.glob(os.path.join(p, pattern))))
+        elif os.path.isfile(p):
+            expanded_files.append(p)
+        else:
+            errors.append(f"Task path not found: '{p}'")
+
+    for f in expanded_files:
+        real_f = os.path.realpath(f)
+        if real_f in seen_files:
+            continue
+        seen_files.add(real_f)
+
+        t, errs = load_and_validate_task(f)
+        if errs or t is None:
+            errors.append(f"Invalid task in '{f}': {'; '.join(errs)}")
+        elif t.task_id not in seen_ids:
+            seen_ids.add(t.task_id)
+            tasks.append(t)
+
+    return tasks, errors
+
+
+def cmd_task_ready(args: argparse.Namespace) -> int:
+    """Evaluate Task DAG and output tasks ready for parallel dispatch."""
+    tasks, errors = _collect_tasks(args.task_files)
+    if errors:
+        for err in errors:
+            print(f"Error: {err}", file=sys.stderr)
+        return 1
+
+    if not tasks:
+        print("Error: No task files provided", file=sys.stderr)
+        return 1
+
+    dag = TaskDAG(tasks)
+    valid, dag_errors = dag.validate_dag()
+    if not valid:
+        print(f"DAG validation failed: {'; '.join(dag_errors)}", file=sys.stderr)
+        return 1
+
+    ready_nodes = dag.get_ready_tasks()
+    if args.json:
+        print(json.dumps({"ready_tasks": [n.task.task_id for n in ready_nodes]}, indent=2))
+    else:
+        print(f"=== Ready Tasks ({len(ready_nodes)}/{len(dag.nodes)}) ===")
+        for n in ready_nodes:
+            deps_str = f" (depends on: {', '.join(n.task.depends_on)})" if n.task.depends_on else " (no dependencies)"
+            print(f"  [READY] {n.task.task_id} -> executor={n.task.execution.executor}{deps_str}")
+
+    return 0
+
+
+def cmd_task_graph(args: argparse.Namespace) -> int:
+    """Display Task DAG dependency graph and state."""
+    tasks, errors = _collect_tasks(args.task_files)
+    if errors:
+        for err in errors:
+            print(f"Error: {err}", file=sys.stderr)
+        return 1
+
+    if not tasks:
+        print("Error: No task files provided", file=sys.stderr)
+        return 1
+
+    dag = TaskDAG(tasks)
+    valid, dag_errors = dag.validate_dag()
+    if not valid:
+        print(f"DAG validation failed: {'; '.join(dag_errors)}", file=sys.stderr)
+        return 1
+
+    dag.evaluate_readiness()
+    if args.json:
+        print(json.dumps(dag.to_dict(), indent=2, ensure_ascii=False))
+    else:
+        print(f"=== Task DAG Graph ({len(dag.nodes)} tasks) ===")
+        for tid, node in dag.nodes.items():
+            deps = node.task.depends_on
+            deps_str = f"depends on [{', '.join(deps)}]" if deps else "root (no dependencies)"
+            print(f"  [{node.status}] {tid} ({node.task.execution.executor}, {node.task.classification.complexity}): {deps_str}")
+    return 0
+
+
+def cmd_worktree_create(args: argparse.Namespace) -> int:
+    """Create an isolated worktree at base_commit for a Task."""
+    filepath = args.task_file
+    if not os.path.exists(filepath):
+        print(f"Error: Task file not found: '{filepath}'", file=sys.stderr)
+        return 1
+
+    task, errors = load_and_validate_task(filepath)
+    if errors or task is None:
+        print(f"Error: Cannot create worktree for invalid task '{filepath}':", file=sys.stderr)
+        for err in errors:
+            print(f"  - {err}", file=sys.stderr)
+        return 1
+
+    try:
+        mgr = WorktreeManager(repo_path=task.repository.path, root_dir=args.root)
+        wt_info = mgr.create_worktree(task, executor=args.executor)
+        if args.json:
+            print(json.dumps(wt_info.to_dict(), indent=2))
+        else:
+            print(f"Worktree CREATED successfully for {task.task_id}:")
+            print(f"  Path:        {wt_info.path}")
+            print(f"  Branch:      {wt_info.branch}")
+            print(f"  Base Commit: {wt_info.base_commit}")
+            print(f"  Executor:    {wt_info.executor}")
+        return 0
+    except Exception as e:
+        print(f"Error creating worktree: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_worktree_list(args: argparse.Namespace) -> int:
+    """List active worktrees under management."""
+    repo_path = args.repo or os.getcwd()
+    try:
+        mgr = WorktreeManager(repo_path=repo_path, root_dir=args.root)
+        worktrees = mgr.list_worktrees()
+        if args.json:
+            print(json.dumps({"worktrees": [w.to_dict() for w in worktrees]}, indent=2))
+        else:
+            print(f"Active Worktrees ({len(worktrees)}) under '{mgr.root_dir}':")
+            for wt in worktrees:
+                print(f"  - {wt.task_id} ({wt.executor}): {wt.path} [branch={wt.branch}, HEAD={wt.base_commit[:8]}]")
+        return 0
+    except Exception as e:
+        print(f"Error listing worktrees: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_worktree_cleanup(args: argparse.Namespace) -> int:
+    """Safely remove a worktree and its branch."""
+    repo_path = args.repo or os.getcwd()
+    try:
+        mgr = WorktreeManager(repo_path=repo_path, root_dir=args.root)
+        cleaned = mgr.cleanup_worktree(args.target, force=args.force)
+        if cleaned:
+            print(f"Worktree '{args.target}' safely removed.")
+            return 0
+        else:
+            print(f"Worktree '{args.target}' not found or already cleaned.", file=sys.stderr)
+            return 1
+    except Exception as e:
+        print(f"Error cleaning worktree: {e}", file=sys.stderr)
+        return 1
+
+
 def cmd_executors(args: argparse.Namespace) -> int:
     """List available and registered executors."""
     try:
@@ -309,7 +478,7 @@ def main() -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # 1. agentctl task ...
-    task_parser = subparsers.add_parser("task", help="Task management, routing, and verification commands")
+    task_parser = subparsers.add_parser("task", help="Task management, routing, DAG, and verification commands")
     task_subparsers = task_parser.add_subparsers(dest="task_subcommand", required=True)
 
     # agentctl task validate TASK.json
@@ -340,18 +509,52 @@ def main() -> int:
     plan_parser.add_argument("--override", "-o", default=None, choices=["agy", "grok"], help="Explicit executor override")
     plan_parser.add_argument("--json", action="store_true", help="Output plan as JSON")
 
-    # agentctl task run TASK.json (Explicitly reject in Phase 7/future)
-    run_parser = task_subparsers.add_parser("run", help="Run task execution (Phase 8+)")
+    # agentctl task ready TASK1.json [TASK2.json ...]
+    ready_parser = task_subparsers.add_parser("ready", help="List tasks currently ready for parallel execution")
+    ready_parser.add_argument("task_files", nargs="+", help="Task JSON file(s) or directories")
+    ready_parser.add_argument("--json", action="store_true", help="Output ready task IDs as JSON")
+
+    # agentctl task graph TASK1.json [TASK2.json ...]
+    graph_parser = task_subparsers.add_parser("graph", help="Display DAG dependency graph")
+    graph_parser.add_argument("task_files", nargs="+", help="Task JSON file(s) or directories")
+    graph_parser.add_argument("--json", action="store_true", help="Output DAG structure as JSON")
+
+    # agentctl task run TASK.json (Explicitly reject in Phase 8/future)
+    run_parser = task_subparsers.add_parser("run", help="Run task execution (Phase 9+)")
     run_parser.add_argument("task_file", help="Path to Task JSON file")
 
-    # 2. agentctl executors
+    # 2. agentctl worktree ...
+    wt_parser = subparsers.add_parser("worktree", help="Worktree management commands")
+    wt_subparsers = wt_parser.add_subparsers(dest="worktree_subcommand", required=True)
+
+    # agentctl worktree create TASK.json
+    wt_create = wt_subparsers.add_parser("create", help="Create an isolated worktree for a Task")
+    wt_create.add_argument("task_file", help="Path to Task JSON file")
+    wt_create.add_argument("--executor", default=None, choices=["agy", "grok"], help="Executor name override")
+    wt_create.add_argument("--root", default=None, help="Root directory for worktrees")
+    wt_create.add_argument("--json", action="store_true", help="Output as JSON")
+
+    # agentctl worktree list
+    wt_list = wt_subparsers.add_parser("list", help="List active worktrees")
+    wt_list.add_argument("--repo", default=None, help="Repository root directory")
+    wt_list.add_argument("--root", default=None, help="Worktree root directory")
+    wt_list.add_argument("--json", action="store_true", help="Output as JSON")
+
+    # agentctl worktree cleanup <target>
+    wt_clean = wt_subparsers.add_parser("cleanup", help="Safely clean up a worktree")
+    wt_clean.add_argument("target", help="Task ID or worktree directory path")
+    wt_clean.add_argument("--repo", default=None, help="Repository root directory")
+    wt_clean.add_argument("--root", default=None, help="Worktree root directory")
+    wt_clean.add_argument("--force", "-f", action="store_true", default=True, help="Force remove worktree")
+
+    # 3. agentctl executors
     exc_parser = subparsers.add_parser("executors", help="List registered executors and their capabilities")
     exc_parser.add_argument("--json", action="store_true", help="Output as JSON")
 
-    # 3. agentctl health
+    # 4. agentctl health
     hlt_parser = subparsers.add_parser("health", help="Probe gateway and executor health")
 
-    # 4. agentctl invoke <executor> --prompt ... --cwd ...
+    # 5. agentctl invoke <executor> --prompt ... --cwd ...
     inv_parser = subparsers.add_parser("invoke", help="Invoke an executor with prompt")
     inv_parser.add_argument("executor", choices=["agy", "grok"], help="Executor name")
     inv_parser.add_argument("--prompt", "-p", required=True, help="Task instruction prompt")
@@ -372,12 +575,23 @@ def main() -> int:
             return cmd_task_route(parsed)
         elif parsed.task_subcommand == "plan":
             return cmd_task_plan(parsed)
+        elif parsed.task_subcommand == "ready":
+            return cmd_task_ready(parsed)
+        elif parsed.task_subcommand == "graph":
+            return cmd_task_graph(parsed)
         elif parsed.task_subcommand == "run":
             print(
-                "Error: 'agentctl task run' is not implemented in Phase 7 (autonomous DAG execution is deferred per Goal Prompt).",
+                "Error: 'agentctl task run' is not implemented in Phase 8 (autonomous DAG execution is deferred per Goal Prompt).",
                 file=sys.stderr,
             )
             return 1
+    elif parsed.command == "worktree":
+        if parsed.worktree_subcommand == "create":
+            return cmd_worktree_create(parsed)
+        elif parsed.worktree_subcommand == "list":
+            return cmd_worktree_list(parsed)
+        elif parsed.worktree_subcommand == "cleanup":
+            return cmd_worktree_cleanup(parsed)
     elif parsed.command == "executors":
         return cmd_executors(parsed)
     elif parsed.command == "health":

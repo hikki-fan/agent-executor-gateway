@@ -4,17 +4,19 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/Version-2.4.0-blue.svg)]()
-[![Status](https://img.shields.io/badge/Status-Phase%207%20Candidate-green.svg)]()
+[![Status](https://img.shields.io/badge/Status-Phase%208%20Candidate-green.svg)]()
 
 High-reliability, executor-neutral **Agent Executor Gateway** providing unified REST API orchestration, session management, and process lifecycle controls for AI coding agents.
 
 > [!NOTE]
-> **Phase 7 Status**: Rule-based Routing (`orchestration/router.py`), Multi-Executor Escalation state machine (`orchestration/escalation.py`), Escalation Context passing with credential redaction, Task Schema validation, Machine Verification pipeline, Scope Control, Completion Reports & Metrics, and `agentctl` CLI commands (`task validate`, `task verify`, `task route`, `task plan`) are fully operational. Worktree isolation (Phase 8) and production gateway cutover remain future phases.
+> **Phase 8 Candidate**: The working tree contains isolated Git Worktree management (`orchestration/worktree.py`), Task DAG & parallel dispatch infrastructure (`orchestration/dag.py`), schema `depends_on` validation, rule-based routing, multi-executor escalation, machine verification, scope control, completion reports & metrics, and the corresponding `agentctl` commands. Codex independent acceptance is pending; production gateway cutover (Phase 9/10) remains a future phase.
 
 ---
 
 ## 🌟 Key Features
 
+- 🌿 **Isolated Git Worktree Management (Phase 8)**: Executor-neutral worktree orchestration (`orchestration/worktree.py`) with designated safe root containment (`<repo_parent>/.agent-worktrees/`), fixed branch naming (`agent/<sanitized-task-id>-<executor>`), strict path traversal prevention, and safe removal via `git worktree remove` and prune.
+- 🌳 **Task DAG & Parallel Dispatch (Phase 8)**: Dependency-aware DAG engine (`orchestration/dag.py`) supporting `depends_on` validation, cycle detection, automatic `READY` / `BLOCKED` state evaluation, and bounded parallel dispatch of independent tasks across worktrees (e.g. AGY Task-A + Grok Task-B simultaneously) without unreviewed automatic merges.
 - 🧭 **Rule-Based Task Router (Phase 7)**: Deterministic executor routing (`orchestration/router.py`) implementing Goal Prompt Section 22:
   - `S` (Low/High) & `M` (Feature/Bugfix/Refactor) -> `agy`
   - `M` (Debug/Investigation) -> `grok`
@@ -22,8 +24,8 @@ High-reliability, executor-neutral **Agent Executor Gateway** providing unified 
   - Explicit Codex/executor override takes absolute precedence and validates target executor.
 - 🔄 **Multi-Executor Escalation Engine (Phase 7)**: Bounded turn state machine (`orchestration/escalation.py`) supporting same-executor self-repair (default 2 attempts), executor escalation (e.g. `agy -> grok`, default 1 switch), and loop prevention triggering `REPLAN_REQUIRED` on switch exhaustion.
 - 📦 **Structured & Redacted Escalation Context (Phase 7)**: Goal Prompt Section 27 handover protocol passing original goal, acceptance criteria, base commit, current git diff, changed files, verification commands, failure output, and previous attempts, with automatic Bearer token and secret redaction (`[REDACTED]`).
-- 🛠️ **Unified `agentctl` CLI Tool (Phase 6 & 7)**: Supports `agentctl task validate`, `agentctl task verify`, `agentctl task route`, `agentctl task plan`, `agentctl executors`, `agentctl health`, and `agentctl invoke`.
-- 📋 **Task Schema & Validation (Phase 6)**: Unified, executor-neutral Task JSON model (`orchestration/task.py`) per Goal Prompt Section 18, validating goals, classifications (S/M/L/XL complexity, risk, type), execution params, scopes, acceptance criteria, and verification commands.
+- 🛠️ **Unified `agentctl` CLI Tool (Phase 6, 7, 8)**: Supports `agentctl worktree create/list/cleanup`, `agentctl task validate/verify/route/plan/ready/graph`, `agentctl executors`, `agentctl health`, and `agentctl invoke`.
+- 📋 **Task Schema & Validation (Phase 6 & 8)**: Unified, executor-neutral Task JSON model (`orchestration/task.py`) per Goal Prompt Section 18, validating goals, classifications, execution params, scopes, acceptance criteria, verification commands, and `depends_on` dependencies.
 - 🧪 **Machine Verification Pipeline (Phase 6)**: Safe declared command runner (`orchestration/verifier.py`) with `shell=False` execution, `cwd` containment, process-group timeout termination (`os.killpg`), log sanitization/redaction, and concise tail output extraction.
 - 🛡️ **Strict Scope Control (Phase 6)**: Git-based scope checking (`orchestration/scope.py`) validating committed, staged, unstaged, and untracked files against `allowed_paths` and `forbidden_paths` globs.
 - 📊 **Standardized Completion Report & Metrics (Phase 6)**: Section 30 JSON Completion Reports with Git diff statistics and Section 38 `.agent/metrics.jsonl` structured metric append.

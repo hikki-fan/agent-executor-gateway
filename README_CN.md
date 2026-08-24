@@ -4,17 +4,19 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/Version-2.4.0-blue.svg)]()
-[![Status](https://img.shields.io/badge/Status-Phase%207%20Candidate-green.svg)]()
+[![Status](https://img.shields.io/badge/Status-Phase%208%20Candidate-green.svg)]()
 
 高可靠、Executor 中立的 **Agent Executor Gateway**，为 AI 编码 Agent 提供统一 REST API 编排、会话状态隔离与进程生命周期管控。
 
 > [!NOTE]
-> **Phase 7 说明**：当前已完整实现基于规则的路由策略 (`orchestration/router.py`)、多执行器升级状态机 (`orchestration/escalation.py`)、结构化上下文脱敏传递、任务模型校验、机器验证流水线、Git 范围控制、完成报告与指标追加，以及 `agentctl` 命令行工具 (`task validate`, `task verify`, `task route`, `task plan`)。Worktree 隔离 (Phase 8) 和生产迁移属于后续阶段。
+> **Phase 8 候选实现**：工作树中已加入独立 Git Worktree 隔离管理 (`orchestration/worktree.py`)、Task DAG 与有界并行分发基础设施 (`orchestration/dag.py`)、`depends_on` 依赖校验、规则路由、多执行器升级、机器验证、范围控制、完成报告与指标，以及对应的 `agentctl` 命令。Codex 独立验收仍待完成；生产迁移与上线 (Phase 9/10) 属于后续阶段。
 
 ---
 
 ## 🌟 核心特性
 
+- 🌿 **独立 Git Worktree 隔离管控 (Phase 8)**：Executor 中立的 Worktree 管理模块 (`orchestration/worktree.py`)，支持安全根目录限制 (`<repo_parent>/.agent-worktrees/`)、规范化分支命名 (`agent/<sanitized-task-id>-<executor>`)、严格路径逃逸防护以及基于 `git worktree remove` 和 prune 的安全清理。
+- 🌳 **Task DAG 与有界并行分发 (Phase 8)**：依赖感知的 DAG 调度引擎 (`orchestration/dag.py`)，支持 `depends_on` 校验、环路检测、`READY` / `BLOCKED` 状态自动判定，以及独立任务跨 Worktree 的有界并发分发（例如 AGY Task-A 与 Grok Task-B 同时在两个独立 worktree 执行），严禁未经评审的自动合并。
 - 🧭 **基于规则的任务路由 (Phase 7)**：实现 Section 22 确定性路由逻辑 (`orchestration/router.py`)：
   - `S`（低/高风险）与 `M`（功能/缺陷修复/重构）自动路由至 `agy`
   - `M`（排错/深入调查）自动路由至 `grok`
@@ -22,8 +24,8 @@
   - 显式 Codex/执行器覆盖具有最高优先级，并严格校验目标合法性。
 - 🔄 **多执行器升级与状态机 (Phase 7)**：实现有界轮次状态机 (`orchestration/escalation.py`)，支持同执行器自我修复（默认 2 次尝试）、执行器升级切换（如 `agy -> grok`，默认 1 次切换），并在切换上限耗尽后触发 `REPLAN_REQUIRED`，彻底杜绝死循环。
 - 📦 **结构化脱敏上下文交接 (Phase 7)**：实现 Section 27 任务交接上下文，传递原始目标、验收标准、基线 Commit、当前 Git Diff、变更文件、验证命令、失败输出及历史轮次记录，全流程自动脱敏 Bearer Token 及敏感凭据 (`[REDACTED]`)。
-- 🛠️ **`agentctl` 统一控制工具 (Phase 6 & 7)**：支持 `agentctl task validate`、`agentctl task verify`、`agentctl task route`、`agentctl task plan`、`agentctl executors`、`agentctl health` 及 `agentctl invoke`。
-- 📋 **统一任务模型与校验 (Phase 6)**：实现 Executor 中立的 Task JSON 规范 (`orchestration/task.py`)，校验目标、分类 (S/M/L/XL 复杂度、风险等级、任务类型)、执行策略、变更范围、验收标准与验证命令。
+- 🛠️ **`agentctl` 统一控制工具 (Phase 6, 7, 8)**：支持 `agentctl worktree create/list/cleanup`、`agentctl task validate/verify/route/plan/ready/graph`、`agentctl executors`、`agentctl health` 及 `agentctl invoke`。
+- 📋 **统一任务模型与校验 (Phase 6 & 8)**：实现 Executor 中立的 Task JSON 规范 (`orchestration/task.py`)，校验目标、分类、执行策略、变更范围、验收标准、验证命令及 `depends_on` 依赖。
 - 🧪 **安全机器验证流水线 (Phase 6)**：安全命令执行器 (`orchestration/verifier.py`)，采用 `shell=False` 解析、`cwd` 严格隔离、进程组超时强杀 (`os.killpg`)、敏感凭据脱敏以及精简尾部日志提取。
 - 🛡️ **严格变更范围管控 (Phase 6)**：基于 Git 状态与 Diff 的边界检查 (`orchestration/scope.py`)，拦截任何超出 `allowed_paths` 或落入 `forbidden_paths` 的已提交、已暂存、未暂存及未跟踪文件。
 - 📊 **标准完成报告与指标 (Phase 6)**：生成 Section 30 JSON Completion Report 并向 `.agent/metrics.jsonl` 追加结构化执行指标。

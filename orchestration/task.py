@@ -85,6 +85,7 @@ class Task:
     scope: ScopeSpec
     acceptance: list[str]
     verification: VerificationSpec
+    depends_on: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize task to dictionary matching Section 18 JSON specification."""
@@ -99,6 +100,7 @@ class Task:
             "scope": asdict(self.scope),
             "acceptance": list(self.acceptance),
             "verification": asdict(self.verification),
+            "depends_on": list(self.depends_on),
         }
 
     def to_json(self, indent: int = 2) -> str:
@@ -369,6 +371,24 @@ def validate_task_dict(data: Any) -> tuple[Task | None, list[str]]:
         else:
             verif_spec = VerificationSpec(commands=[c.strip() for c in commands])
 
+    # 11. depends_on (optional, defaults to [])
+    depends_on_data = data.get("depends_on")
+    depends_on_list: list[str] = []
+    if depends_on_data is not None:
+        if not isinstance(depends_on_data, list):
+            errors.append("Field 'depends_on' must be a list of task ID strings")
+        elif not all(isinstance(d, str) for d in depends_on_data):
+            errors.append("All items in 'depends_on' must be strings")
+        elif not all(d.strip() for d in depends_on_data):
+            errors.append("All items in 'depends_on' must be non-empty strings")
+        else:
+            seen: set[str] = set()
+            for d in depends_on_data:
+                cleaned = d.strip()
+                if cleaned not in seen:
+                    seen.add(cleaned)
+                    depends_on_list.append(cleaned)
+
     if errors or not repo_spec or not class_spec or not exec_spec or not scope_spec or not verif_spec:
         return None, errors
 
@@ -383,6 +403,7 @@ def validate_task_dict(data: Any) -> tuple[Task | None, list[str]]:
         scope=scope_spec,
         acceptance=[str(item).strip() for item in acceptance],
         verification=verif_spec,
+        depends_on=depends_on_list,
     )
     return task, []
 

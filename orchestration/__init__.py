@@ -1,8 +1,8 @@
 """
-Orchestration Package for Agent Executor Gateway (Phase 6 & 7).
+Orchestration Package for Agent Executor Gateway (Phase 6, 7, 8).
 
 Exports Task schema, verification pipeline, scope control, completion reporting, metrics,
-rule-based router, and multi-executor escalation state machine.
+rule-based router, multi-executor escalation state machine, worktree isolation, and DAG infrastructure.
 """
 
 from __future__ import annotations
@@ -54,6 +54,29 @@ from orchestration.escalation import (
     get_git_diff_text,
     init_escalation_state,
 )
+from orchestration.worktree import (
+    DEFAULT_WORKTREE_DIR_NAME,
+    WorktreeInfo,
+    WorktreeManager,
+    get_default_worktree_root,
+    is_path_inside_root,
+    sanitize_task_id,
+)
+from orchestration.dag import (
+    STATE_BLOCKED,
+    STATE_CANCELLED,
+    STATE_CREATED,
+    STATE_DONE,
+    STATE_FAILED,
+    STATE_INTEGRATING,
+    STATE_READY,
+    STATE_REVIEWING,
+    STATE_RUNNING,
+    STATE_VERIFYING,
+    TaskDAG,
+    TaskNode,
+    run_dag_parallel,
+)
 
 __all__ = [
     "ALLOWED_COMPLEXITIES",
@@ -91,4 +114,23 @@ __all__ = [
     "evaluate_escalation",
     "get_git_diff_text",
     "init_escalation_state",
+    "DEFAULT_WORKTREE_DIR_NAME",
+    "WorktreeInfo",
+    "WorktreeManager",
+    "get_default_worktree_root",
+    "is_path_inside_root",
+    "sanitize_task_id",
+    "STATE_BLOCKED",
+    "STATE_CANCELLED",
+    "STATE_CREATED",
+    "STATE_DONE",
+    "STATE_FAILED",
+    "STATE_INTEGRATING",
+    "STATE_READY",
+    "STATE_REVIEWING",
+    "STATE_RUNNING",
+    "STATE_VERIFYING",
+    "TaskDAG",
+    "TaskNode",
+    "run_dag_parallel",
 ]
