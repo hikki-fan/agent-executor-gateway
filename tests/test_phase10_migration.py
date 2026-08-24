@@ -17,6 +17,7 @@ import json
 import os
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -412,6 +413,119 @@ echo "ALL_SAFE"
         self.assertEqual(res.returncode, 0, f"Signal helper failed: {res.stdout}\n{res.stderr}")
         self.assertIn("ALL_SAFE", res.stdout)
 
+    def test_17_token_alignment_reuses_valid_legacy_token(self):
+        # When ACP_TOKEN_FILE is unset and LEGACY_DEFAULT_TOKEN_FILE is regular 0600, ensure_token reuses it
+        temp_dir = tempfile.mkdtemp(prefix="token_test_")
+        try:
+            legacy_token = os.path.join(temp_dir, "legacy.token")
+            run_dir = os.path.join(temp_dir, "run")
+            with open(legacy_token, "w") as f:
+                f.write("legacy-secret-token-12345\n")
+            os.chmod(legacy_token, 0o600)
+
+            test_script = f"""
+export MIGRATION_RUN_DIR="{run_dir}"
+export LEGACY_DEFAULT_TOKEN_FILE="{legacy_token}"
+unset ACP_TOKEN_FILE
+source "{self.script_path}"
+ensure_token
+echo "FINAL_TOKEN_FILE=$PROD_TOKEN_FILE"
+"""
+            res = subprocess.run(["bash", "-c", test_script], capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0)
+            self.assertIn(f"FINAL_TOKEN_FILE={legacy_token}", res.stdout)
+            self.assertIn("Token Alignment: Reusing verified legacy token", res.stdout)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_18_token_alignment_creates_migration_token_when_legacy_insecure_or_symlink(self):
+        # When legacy token is insecure (e.g. 0644 or symlink), ensure_token creates controlled migration token
+        temp_dir = tempfile.mkdtemp(prefix="token_test_insecure_")
+        try:
+            legacy_insecure = os.path.join(temp_dir, "insecure.token")
+            run_dir = os.path.join(temp_dir, "run")
+            with open(legacy_insecure, "w") as f:
+                f.write("insecure-token\n")
+            os.chmod(legacy_insecure, 0o644)
+
+            test_script = f"""
+export MIGRATION_RUN_DIR="{run_dir}"
+export LEGACY_DEFAULT_TOKEN_FILE="{legacy_insecure}"
+unset ACP_TOKEN_FILE
+source "{self.script_path}"
+ensure_token
+echo "FINAL_TOKEN_FILE=$PROD_TOKEN_FILE"
+"""
+            res = subprocess.run(["bash", "-c", test_script], capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0)
+            expected_migration_token = os.path.join(run_dir, "production.token")
+            self.assertIn(f"FINAL_TOKEN_FILE={expected_migration_token}", res.stdout)
+            self.assertIn("Token Alignment Notice:", res.stdout)
+            self.assertTrue(os.path.exists(expected_migration_token))
+            self.assertEqual(oct(stat.S_IMODE(os.stat(expected_migration_token).st_mode)), "0o600")
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_19_token_alignment_respects_custom_acp_token_file_override(self):
+        temp_dir = tempfile.mkdtemp(prefix="token_test_custom_")
+        try:
+            custom_token = os.path.join(temp_dir, "custom.token")
+            run_dir = os.path.join(temp_dir, "run")
+
+            test_script = f"""
+export MIGRATION_RUN_DIR="{run_dir}"
+export ACP_TOKEN_FILE="{custom_token}"
+source "{self.script_path}"
+ensure_token
+echo "FINAL_TOKEN_FILE=$PROD_TOKEN_FILE"
+"""
+            res = subprocess.run(["bash", "-c", test_script], capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0)
+            self.assertIn(f"FINAL_TOKEN_FILE={custom_token}", res.stdout)
+            self.assertTrue(os.path.exists(custom_token))
+            self.assertEqual(oct(stat.S_IMODE(os.stat(custom_token).st_mode)), "0o600")
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_20_preflight_blocks_legacy_persistent_startup_hooks(self):
+        temp_dir = tempfile.mkdtemp(prefix="startup_handoff_block_")
+        try:
+            entrypoint = os.path.join(temp_dir, "start-codex-container")
+            with open(entrypoint, "w") as f:
+                f.write("#!/bin/sh\n# old hook\n/workspace/scripts/acp_watchdog.sh\n")
+            os.chmod(entrypoint, 0o755)
+
+            env = self.base_env.copy()
+            env["STARTUP_ENTRYPOINT_FILE"] = entrypoint
+            env["STARTUP_PROFILE_FILE"] = ""
+            env["GATEWAY_WATCHDOG_SCRIPT"] = os.path.join(self.repo_root, "scripts", "gateway_watchdog.sh")
+            res = subprocess.run([self.script_path, "preflight"], env=env, capture_output=True, text=True)
+            self.assertEqual(res.returncode, 1)
+            self.assertIn("Legacy startup hook still present", res.stdout)
+            self.assertIn("Cutover remains blocked", res.stdout)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_21_default_legacy_graceful_timeout_covers_live_budget(self):
+        command = f'source "{self.script_path}"; validate_legacy_graceful_timeout; printf "%s" "$LEGACY_GRACEFUL_TIMEOUT_SEC"'
+        res = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertTrue(res.stdout.endswith("335"), res.stdout)
+
+    def test_22_gateway_watchdog_candidate_has_isolation_guards(self):
+        watchdog_path = os.path.join(self.repo_root, "scripts", "gateway_watchdog.sh")
+        with open(watchdog_path, encoding="utf-8") as f:
+            source = f.read()
+        self.assertIn("AGENT_EXECUTOR_GATEWAY_STARTUP_HANDOFF", source)
+        self.assertIn("flock -n 201", source)
+        self.assertIn("201>&-", source)
+        self.assertIn("close_fds=True", source)
+        self.assertIn("start_new_session=True", source)
+        self.assertIn("curl -fsS --max-time", source)
+        self.assertIn("port_has_listener", source)
+        self.assertNotIn("acp_watchdog.sh", source)
+        self.assertNotIn("ensure_acp_bridge.sh", source)
+
 
 class TestPhase10SandboxCutoverRollbackLifecycle(unittest.TestCase):
     """
@@ -479,6 +593,16 @@ server.serve_forever()
             f.write("#!/usr/bin/env bash\nwhile true; do sleep 1; done\n")
         os.chmod(self.mock_watchdog_script, 0o755)
 
+        # The sandbox models an already-installed, explicit gateway startup handoff.
+        self.startup_entrypoint = os.path.join(self.test_dir, "start-codex-container")
+        self.startup_profile = os.path.join(self.test_dir, "bashrc")
+        gateway_watchdog = os.path.join(os.path.dirname(self.script_path), "gateway_watchdog.sh")
+        handoff = f"# AGENT_EXECUTOR_GATEWAY_STARTUP_HANDOFF\nsetsid {gateway_watchdog} </dev/null >/dev/null 2>&1 &\n"
+        for startup_file in (self.startup_entrypoint, self.startup_profile):
+            with open(startup_file, "w") as f:
+                f.write(handoff)
+            os.chmod(startup_file, 0o644)
+
         self.env = os.environ.copy()
         self.env["PROD_PORT"] = self.sandbox_prod_port
         self.env["CANDIDATE_PORT"] = self.sandbox_cand_port
@@ -487,6 +611,9 @@ server.serve_forever()
         self.env["WATCHDOG_SCRIPT"] = self.mock_watchdog_script
         self.env["MIGRATION_RUN_DIR"] = self.run_dir
         self.env["ACP_TOKEN_FILE"] = os.path.join(self.run_dir, "production.token")
+        self.env["STARTUP_ENTRYPOINT_FILE"] = self.startup_entrypoint
+        self.env["STARTUP_PROFILE_FILE"] = self.startup_profile
+        self.env["GATEWAY_WATCHDOG_SCRIPT"] = os.path.join(os.path.dirname(self.script_path), "gateway_watchdog.sh")
 
         self.old_proc = None
 

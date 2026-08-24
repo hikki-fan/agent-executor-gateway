@@ -9,7 +9,7 @@
 High-reliability, executor-neutral **Agent Executor Gateway** providing unified REST API orchestration, session management, and process lifecycle controls for AI coding agents.
 
 > [!NOTE]
-> **Phase 10 Candidate Tooling**: The working tree contains reversible production migration tooling (`scripts/migrate_production.sh`), two-factor confirmation safety gates (`--confirm-cutover` + `CONFIRM_PRODUCTION_CUTOVER=1`), read-only preflight inspections, candidate lifecycle controls (`scripts/migration_candidate.sh`), isolated Git Worktrees (`orchestration/worktree.py`), and Task DAG dispatch (`orchestration/dag.py`). Active production continues running on `antigravity-rest-bridge` (:8765) completely untouched. Production cutover execution (Phase 10 manual trigger) and legacy bridge retirement (Phase 11) require explicit separate authorizations.
+> **Phase 10 Candidate Tooling**: The working tree contains reversible production migration tooling (`scripts/migrate_production.sh`), two-factor confirmation safety gates (`--confirm-cutover` + `CONFIRM_PRODUCTION_CUTOVER=1`), read-only preflight inspections, a candidate persistent supervisor (`scripts/gateway_watchdog.sh`), candidate lifecycle controls (`scripts/migration_candidate.sh`), isolated Git Worktrees (`orchestration/worktree.py`), and Task DAG dispatch (`orchestration/dag.py`). Preflight also blocks cutover until persistent startup wiring points to the new supervisor. Active production continues running on `antigravity-rest-bridge` (:8765) completely untouched. Production cutover execution (Phase 10 manual trigger) and legacy bridge retirement (Phase 11) require explicit separate authorizations.
 
 ---
 
