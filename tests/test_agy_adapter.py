@@ -550,10 +550,12 @@ class TestAntigravityAdapterTimeoutAndCwd(unittest.TestCase):
 
     def test_19_timeout_sec_propagation(self):
         captured_timeout = None
+        captured_command = None
 
         def runner(cmd, timeout, env=None, cwd=None):
-            nonlocal captured_timeout
+            nonlocal captured_timeout, captured_command
             captured_timeout = timeout
+            captured_command = cmd
             return subprocess.CompletedProcess(
                 args=cmd,
                 returncode=0,
@@ -565,6 +567,10 @@ class TestAntigravityAdapterTimeoutAndCwd(unittest.TestCase):
         adapter.invoke(prompt="test", timeout_sec=120)
         self.assertIsNotNone(captured_timeout)
         self.assertAlmostEqual(captured_timeout, 120.0, delta=1.0)
+        self.assertIsNotNone(captured_command)
+        timeout_idx = captured_command.index("--print-timeout")
+        self.assertEqual(captured_command[timeout_idx + 1], "120s")
+        self.assertLess(timeout_idx, captured_command.index("-p"))
 
 
 class TestHTTPDelegationThroughAdapter(unittest.TestCase):

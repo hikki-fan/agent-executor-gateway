@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Custom Antigravity REST Bridge Server for Codex Integration (v2.4.0)
+Custom Agent Executor Gateway for Codex Integration (legacy-compatible API surface)
 Phase 1 Refactored Architecture:
 - Core primitives extracted to neutral core modules (auth, config, concurrency, session_lock, process, timeout, result)
 - Provider specifics extracted to AntigravityAdapter (command construction, parsing, retry, classification)
@@ -24,6 +24,7 @@ from typing import Any
 
 from adapters.antigravity import AntigravityAdapter, AntigravityConfig
 from adapters.grok import GrokAdapter, GrokConfig
+from adapters.kimi import KimiAdapter, KimiConfig
 from api.executors import ExecutorRegistry, validate_invoke_request
 from core.auth import load_or_create_token, verify_bearer_token
 from core.concurrency import AdmissionController
@@ -36,6 +37,7 @@ from core.session_lock import SessionLockManager
 gateway_config = GatewayConfig.from_env()
 agy_config = AntigravityConfig.from_env()
 grok_config = GrokConfig.from_env()
+kimi_config = KimiConfig.from_env()
 
 PORT = gateway_config.port
 TOKEN_FILE = gateway_config.token_file
@@ -47,6 +49,7 @@ SOCKET_TIMEOUT = gateway_config.socket_timeout_sec
 AGY_BIN = agy_config.bin_path
 AGY_MAX_CONCURRENCY = agy_config.max_concurrency
 GROK_MAX_CONCURRENCY = grok_config.max_concurrency
+KIMI_MAX_CONCURRENCY = kimi_config.max_concurrency
 GATEWAY_MAX_CONCURRENCY = gateway_config.max_gateway_concurrency
 SUBPROCESS_TIMEOUT = agy_config.subprocess_timeout_sec
 AUTH_GRACE_SEC = agy_config.auth_grace_sec
@@ -64,6 +67,7 @@ admission_controller = AdmissionController(
     executor_limits={
         "agy": AGY_MAX_CONCURRENCY,
         "grok": GROK_MAX_CONCURRENCY,
+        "kimi": KIMI_MAX_CONCURRENCY,
     },
 )
 
@@ -72,6 +76,7 @@ gateway_semaphore = admission_controller.gateway_semaphore
 agent_semaphore = gateway_semaphore
 agy_semaphore = admission_controller._executor_semaphores["agy"]
 grok_semaphore = admission_controller._executor_semaphores["grok"]
+kimi_semaphore = admission_controller._executor_semaphores["kimi"]
 http_connection_semaphore = admission_controller.http_semaphore
 post_connection_semaphore = admission_controller.post_semaphore
 
@@ -140,10 +145,17 @@ grok_adapter = GrokAdapter(
     config=grok_config,
 )
 
+# Instantiate the Kimi adapter against the same isolated process-group runner.
+kimi_adapter = KimiAdapter(
+    runner=_adapter_runner_dispatch,
+    config=kimi_config,
+)
+
 # Generic Executor Registry managing registered adapters
 executor_registry = ExecutorRegistry()
 executor_registry.register(agy_adapter)
 executor_registry.register(grok_adapter)
+executor_registry.register(kimi_adapter)
 
 
 # Thin compatibility wrappers delegating to AntigravityAdapter
@@ -258,11 +270,12 @@ class ACPRequestHandler(http.server.BaseHTTPRequestHandler):
                     "gateway_max_concurrency": GATEWAY_MAX_CONCURRENCY,
                     "agy_max_concurrency": AGY_MAX_CONCURRENCY,
                     "grok_max_concurrency": GROK_MAX_CONCURRENCY,
+                    "kimi_max_concurrency": KIMI_MAX_CONCURRENCY,
                     "max_http_connections": MAX_HTTP_CONNECTIONS,
                     "max_post_connections": MAX_POST_CONNECTIONS,
                     "reserved_health_slots": MAX_HTTP_CONNECTIONS - MAX_POST_CONNECTIONS,
                     "socket_timeout_sec": SOCKET_TIMEOUT,
-                    "admission_control": f"HTTP 429 Unified Semaphore (gateway={GATEWAY_MAX_CONCURRENCY}, agy={AGY_MAX_CONCURRENCY}, grok={GROK_MAX_CONCURRENCY})",
+                    "admission_control": f"HTTP 429 Unified Semaphore (gateway={GATEWAY_MAX_CONCURRENCY}, agy={AGY_MAX_CONCURRENCY}, grok={GROK_MAX_CONCURRENCY}, kimi={KIMI_MAX_CONCURRENCY})",
                 },
             })
         elif path == "/v1/executors":

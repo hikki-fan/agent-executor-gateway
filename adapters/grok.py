@@ -35,7 +35,7 @@ FALLBACK_GROK_PATHS = (
 DEFAULT_GROK_TIMEOUT_SEC = 900
 DEFAULT_GROK_PERMISSION_MODE = "bypassPermissions"
 DEFAULT_GROK_MAX_TURNS = 50
-DEFAULT_GROK_MAX_CONCURRENCY = 1
+DEFAULT_GROK_MAX_CONCURRENCY = 10
 # Parent Grok sessions export these; inheriting them would attach gateway
 # turns to the wrong conversation instead of --session-id / --resume.
 INHERITED_SESSION_ENV_KEYS = ("GROK_SESSION_ID", "GROK_AGENT", "GROK_WORKTREE")

@@ -31,6 +31,7 @@ if REPO_ROOT not in sys.path:
 from core.auth import load_or_create_token, verify_bearer_token
 from core.concurrency import AdmissionController
 from core.config import (
+    DEFAULT_GATEWAY_MAX_CONCURRENCY,
     DEFAULT_MAX_CONTENT_LENGTH,
     DEFAULT_MAX_HTTP_CONNECTIONS,
     DEFAULT_MAX_POST_CONNECTIONS,
@@ -216,6 +217,8 @@ class TestCoreConfig(unittest.TestCase):
         self.assertEqual(cfg.max_content_length, DEFAULT_MAX_CONTENT_LENGTH)
         self.assertEqual(cfg.max_http_connections, DEFAULT_MAX_HTTP_CONNECTIONS)
         self.assertEqual(cfg.max_post_connections, DEFAULT_MAX_POST_CONNECTIONS)
+        self.assertEqual(cfg.max_gateway_concurrency, DEFAULT_GATEWAY_MAX_CONCURRENCY)
+        self.assertEqual(cfg.max_gateway_concurrency, 10)
         self.assertEqual(cfg.socket_timeout_sec, DEFAULT_SOCKET_TIMEOUT)
 
     def test_10_gateway_config_from_env(self):

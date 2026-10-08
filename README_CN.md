@@ -9,7 +9,7 @@
 高可靠、Executor 中立的 **Agent Executor Gateway**，为 AI 编码 Agent 提供统一 REST API 编排、会话状态隔离与进程生命周期管控。
 
 > [!NOTE]
-> **生产迁移已完成**：`agent-executor-gateway` 已成为 `:8765` 上唯一的生产 Executor 入口，由 `scripts/gateway_watchdog.sh` 常驻监督，并通过统一 API 提供 AGY 与 Grok。旧 `antigravity-rest-bridge` 部署已停止，其 GitHub 仓库已于 2026 年 8 月 24 日归档。私有迁移备份继续用于紧急恢复，但所有新功能与缺陷修复只在本仓库维护。详见 [Phase 11 报告](./docs/PHASE-11-REPORT.md)。
+> **生产迁移已完成**：`agent-executor-gateway` 已成为 `:8765` 上唯一的生产 Executor 入口，由 `scripts/gateway_watchdog.sh` 常驻监督，并通过统一 API 提供 AGY、Grok 与 Kimi。前端实现任务路由给 Kimi，Codex 负责审查和回归验收。旧 `antigravity-rest-bridge` 部署已停止，其 GitHub 仓库已于 2026 年 8 月 24 日归档。私有迁移备份继续用于紧急恢复，但所有新功能与缺陷修复只在本仓库维护。详见 [Phase 11 报告](./docs/PHASE-11-REPORT.md)。
 
 可选启动交接工具 (`scripts/install_startup_handoff.py`) 默认只读；只有同时提供 `--apply`、`--confirm-startup-handoff` 和 `CONFIRM_STARTUP_HANDOFF=1` 才会执行，并在原子更新入口/profile 前创建私有备份。
 
@@ -19,8 +19,9 @@
 
 - 🚀 **双端口共存迁移候选 (Phase 9)**：候选管理脚本 (`scripts/migration_candidate.sh`) 在 `8766` 上独立管理 PID、日志与 `0600` Token，已用于完成生产切换前验证，并可在回滚窗口内继续做隔离回归。
 - 🌿 **独立 Git Worktree 隔离管控 (Phase 8)**：Executor 中立的 Worktree 管理模块 (`orchestration/worktree.py`)，支持安全根目录限制 (`<repo_parent>/.agent-worktrees/`)、规范化分支命名 (`agent/<sanitized-task-id>-<executor>`)、严格路径逃逸防护以及基于 `git worktree remove` 和 prune 的安全清理。
-- 🌳 **Task DAG 与有界并行分发 (Phase 8)**：依赖感知的 DAG 调度引擎 (`orchestration/dag.py`)，支持 `depends_on` 校验、环路检测、`READY` / `BLOCKED` 状态自动判定，以及独立任务跨 Worktree 的有界并发分发（例如 AGY Task-A 与 Grok Task-B 同时在两个独立 worktree 执行），严禁未经评审的自动合并。
+- 🌳 **Task DAG 与有界并行分发 (Phase 8)**：依赖感知的 DAG 调度引擎 (`orchestration/dag.py`)，支持 `depends_on` 校验、环路检测、`READY` / `BLOCKED` 状态自动判定，以及独立任务跨 Worktree 的有界并发分发，严禁未经评审的自动合并。
 - 🧭 **基于规则的任务路由 (Phase 7)**：实现 Section 22 确定性路由逻辑 (`orchestration/router.py`)：
+  - `S` / `M` 前端实现任务自动路由至 `kimi`
   - `S`（低/高风险）与 `M`（功能/缺陷修复/重构）自动路由至 `agy`
   - `M`（排错/深入调查）自动路由至 `grok`
   - `L` / `XL` 阻断全自动执行，强制返回需人工/Codex 拆分或覆盖的决策
@@ -33,11 +34,11 @@
 - 🛡️ **严格变更范围管控 (Phase 6)**：基于 Git 状态与 Diff 的边界检查 (`orchestration/scope.py`)，拦截任何超出 `allowed_paths` 或落入 `forbidden_paths` 的已提交、已暂存、未暂存及未跟踪文件。
 - 📊 **标准完成报告与指标 (Phase 6)**：生成 Section 30 JSON Completion Report 并向 `.agent/metrics.jsonl` 追加结构化执行指标。
 - 🌐 **统一 Generic Executor API (Phase 2 & 4)**：提供标准化的执行器发现 (`GET /v1/executors`)、健康检查 (`GET /v1/executors/{executor}/health`) 与统一调用 (`POST /v1/executors/{executor}/invoke`)。
-- 🤖 **多执行器后端支持**：同时支持 Google Antigravity (`agy`) 与 Grok Build (`grok`) 无头 CLI 运行环境。
+- 🤖 **多执行器后端支持**：支持 Google Antigravity (`agy`)、Grok Build (`grok`) 与 Kimi Code (`kimi`) 无头 CLI 运行环境。
 - 📊 **Section 10 统一结果契约**：所有执行器统一返回 `ExecutorResult` 结构 (`status`, `executor`, `session_id`, `response`, `exit_code`, `timing`, `usage`, `warnings`, `error`, `raw`)。
 - 🎯 **显式 1:1 会话隔离与无状态网关**：客户端持有 `session_id`（或旧版 `conversation_id`），完全杜绝全局 `agy -c` 抢占。
 - 🔒 **单会话并发互斥锁（Per-Session Lock）**：针对同一 `(executor, session_id)` 的并发请求自动返回 `HTTP 409 Conflict`，且跨 Generic 与 Legacy 接口统一生效。
-- 🛑 **统一有界准入控制（HTTP 429）**：全局 `GATEWAY_MAX_CONCURRENCY` 与独立的 `AGY_MAX_CONCURRENCY` / `GROK_MAX_CONCURRENCY` 信号量，超额立即返回 `HTTP 429`。
+- 🛑 **统一有界准入控制（HTTP 429）**：默认全局最多 10 个并发任务，各执行器各自也最多 10 个；全局上限保证总任务数不超过 10。
 - ⏱️ **灵活超时预算管理**：支持请求级 `timeout_sec` 超时覆盖，同时控制执行预算与外层等待窗口（+5s 传输余量），超时通过 `os.killpg(pgid, SIGKILL)` 彻底清理进程组。
 - 🔁 **前置异常智能重试**：新会话在 0-turn 启动阶段遇到 transient 错误（EOF/网络重置）自动重试最多 3 次，运行中错误如实保留供客户端决策。
 - 🟡 **部分成功保留**：执行器已生成可用回复但退出状态为非零时返回 HTTP 200 `partial_success`，保留回复及诊断告警。
@@ -45,6 +46,7 @@
 - ⚡ **通用探针连接保障**：独立 45-POST 上限为探针和其他请求保留 5 个通用 HTTP 连接槽；这 5 个槽并非 `/health` 专属。
 - 🛡️ **慢连接与 Slowloris 防护**：配置单次 I/O 超时（10s）、请求体大小限制（2MB）以及 HTTP 总连接数上限（50）。
 - 🔄 **完整 Legacy ACP 兼容**：保留所有 `/acp/v1/*` 接口，无缝兼容现有 Codex 工作流。
+- 🔌 **Codex MCP 适配器**：`mcp_server.py` 通过本地 STDIO MCP 暴露健康检查、AGY、Grok 与 Kimi 工具，同时保持 Gateway 作为带鉴权的生产执行边界。
 
 ---
 
@@ -88,7 +90,26 @@
                                    └────────────────────────────────┘
 ```
 
+Kimi 已与 AGY、Grok 一同注册；通过 `stream-json` 输出并返回会话 ID，供后续续接。
+
 ---
+
+## 🔌 Codex MCP 接入
+
+Codex 可在用户级 `~/.codex/config.toml` 中加载本地 STDIO 适配器：
+
+```toml
+[mcp_servers.agent_executor_gateway]
+command = "/usr/bin/python3"
+args = ["/workspace/agent-executor-gateway/mcp_server.py"]
+cwd = "/workspace/agent-executor-gateway"
+tool_timeout_sec = 930
+default_tools_approval_mode = "prompt"
+```
+
+适配器提供 `gateway_health`、`gateway_executor_health`、`agy_invoke`、
+`grok_invoke` 和 `kimi_invoke`。前端实现使用 `kimi_invoke`；Codex 仍负责定义范围、审查 Diff 和回归验收。它仅在调用 POST 接口时读取现有本地 Token 文件，不打印 Token，也不会自行启动 Provider CLI。修改 MCP 配置后，需要重启本地 Codex
+客户端或新建本地会话。
 
 ## 📡 REST API 接口文档
 
@@ -112,20 +133,26 @@ curl -s http://127.0.0.1:8765/v1/executors
       "name": "grok",
       "available": true,
       "supports_session": true
+    },
+    {
+      "name": "kimi",
+      "available": true,
+      "supports_session": true
     }
   ]
 }
 ```
 
 #### 执行器健康检查 (`GET /v1/executors/{executor}/health`)
-无需鉴权。支持 `agy` 与 `grok`。
+无需鉴权。支持 `agy`、`grok` 与 `kimi`。
 ```bash
 curl -s http://127.0.0.1:8765/v1/executors/agy/health
 curl -s http://127.0.0.1:8765/v1/executors/grok/health
+curl -s http://127.0.0.1:8765/v1/executors/kimi/health
 ```
 
 #### 统一任务调用 (`POST /v1/executors/{executor}/invoke`)
-需要 Bearer Token 鉴权。支持执行器：`agy`、`grok`。
+需要 Bearer Token 鉴权。支持执行器：`agy`、`grok`、`kimi`。
 
 - **启动 AGY 新建任务 / 会话**：
 ```bash
@@ -259,8 +286,8 @@ curl -s -X POST http://127.0.0.1:8765/v1/executors/grok/invoke \
 | :--- | :--- | :--- |
 | **会话隔离模型** | 显式 `session_id` / `conversation_id` | 客户端持有 ID；完全取消全局 `agy -c` 抢占 |
 | **会话并发互斥** | `HTTP 409 Conflict` | 跨 Generic 与 Legacy 统一互斥保护 |
-| **Gateway 全局任务上限** | `GATEWAY_MAX_CONCURRENCY`（默认 `2`） | 覆盖所有执行器的全局有界信号量，超额返回 `HTTP 429` |
-| **执行器任务上限** | `AGY_MAX_CONCURRENCY=1`、`GROK_MAX_CONCURRENCY=1` | 各执行器独立有界信号量，超额返回 `HTTP 429` |
+| **Gateway 全局任务上限** | `GATEWAY_MAX_CONCURRENCY`（默认 `10`） | 覆盖所有执行器的全局有界信号量，超额返回 `HTTP 429` |
+| **执行器任务上限** | `AGY_MAX_CONCURRENCY=10`、`GROK_MAX_CONCURRENCY=10`、`KIMI_MAX_CONCURRENCY=10` | 各执行器独立有界信号量；全局上限仍将总并发限制为 10 |
 | **范围越界管控** | Git 状态/Diff 对比 allowed/forbidden globs | 发生任何越界返回 `scope_violation` 失败 |
 | **安全机器验证** | `shell=False` 在仓库 `cwd` 中隔离执行 | 进程组 SIGKILL 强杀、敏感凭据脱敏与精简尾部日志 |
 | **任务执行预算** | 请求 `timeout_sec` 或执行器默认值 | 组合期限到期后通过 `os.killpg(pgid, SIGKILL)` 清理进程组 |

@@ -9,7 +9,7 @@
 High-reliability, executor-neutral **Agent Executor Gateway** providing unified REST API orchestration, session management, and process lifecycle controls for AI coding agents.
 
 > [!NOTE]
-> **Production migration complete**: `agent-executor-gateway` is the sole production executor entry on `:8765`, supervised by `scripts/gateway_watchdog.sh`, with both AGY and Grok available through the unified API. The superseded `antigravity-rest-bridge` deployment is stopped and its GitHub repository was archived on August 24, 2026. Private migration backups remain available for emergency recovery, but feature and bug-fix development now happens only here. See the [Phase 11 report](./docs/PHASE-11-REPORT.md).
+> **Production migration complete**: `agent-executor-gateway` is the sole production executor entry on `:8765`, supervised by `scripts/gateway_watchdog.sh`, with AGY, Grok, and Kimi available through the unified API. Frontend implementation is routed to Kimi; Codex reviews and verifies its changes. The superseded `antigravity-rest-bridge` deployment is stopped and its GitHub repository was archived on August 24, 2026. Private migration backups remain available for emergency recovery, but feature and bug-fix development now happens only here. See the [Phase 11 report](./docs/PHASE-11-REPORT.md).
 
 The optional startup handoff helper (`scripts/install_startup_handoff.py`) is read-only by default. Applying it requires `--apply`, `--confirm-startup-handoff`, and `CONFIRM_STARTUP_HANDOFF=1`; it creates private backups and atomically updates the entrypoint/profile only after those confirmations.
 
@@ -19,8 +19,9 @@ The optional startup handoff helper (`scripts/install_startup_handoff.py`) is re
 
 - 🚀 **Migration Candidate Coexistence (Phase 9)**: Candidate deployment helper (`scripts/migration_candidate.sh`) manages isolated PID, log, and `0600` token on candidate port `8766`; this supported the completed cutover and remains available for rollback-oriented verification.
 - 🌿 **Isolated Git Worktree Management (Phase 8)**: Executor-neutral worktree orchestration (`orchestration/worktree.py`) with designated safe root containment (`<repo_parent>/.agent-worktrees/`), fixed branch naming (`agent/<sanitized-task-id>-<executor>`), strict path traversal prevention, and safe removal via `git worktree remove` and prune.
-- 🌳 **Task DAG & Parallel Dispatch (Phase 8)**: Dependency-aware DAG engine (`orchestration/dag.py`) supporting `depends_on` validation, cycle detection, automatic `READY` / `BLOCKED` state evaluation, and bounded parallel dispatch of independent tasks across worktrees (e.g. AGY Task-A + Grok Task-B simultaneously) without unreviewed automatic merges.
+- 🌳 **Task DAG & Parallel Dispatch (Phase 8)**: Dependency-aware DAG engine (`orchestration/dag.py`) supporting `depends_on` validation, cycle detection, automatic `READY` / `BLOCKED` state evaluation, and bounded parallel dispatch of independent tasks across worktrees without unreviewed automatic merges.
 - 🧭 **Rule-Based Task Router (Phase 7)**: Deterministic executor routing (`orchestration/router.py`) implementing Goal Prompt Section 22:
+  - `S` / `M` frontend implementation -> `kimi`
   - `S` (Low/High) & `M` (Feature/Bugfix/Refactor) -> `agy`
   - `M` (Debug/Investigation) -> `grok`
   - `L` / `XL` -> Manual decomposition / Codex override required (no unvetted execution)
@@ -33,11 +34,11 @@ The optional startup handoff helper (`scripts/install_startup_handoff.py`) is re
 - 🛡️ **Strict Scope Control (Phase 6)**: Git-based scope checking (`orchestration/scope.py`) validating committed, staged, unstaged, and untracked files against `allowed_paths` and `forbidden_paths` globs.
 - 📊 **Standardized Completion Report & Metrics (Phase 6)**: Section 30 JSON Completion Reports with Git diff statistics and Section 38 `.agent/metrics.jsonl` structured metric append.
 - 🌐 **Unified Generic Executor API (Phase 2 & 4)**: Standardized executor discovery (`GET /v1/executors`), health checks (`GET /v1/executors/{executor}/health`), and invocation (`POST /v1/executors/{executor}/invoke`).
-- 🤖 **Multi-Provider Support**: Supports both Google Antigravity (`agy`) and Grok Build (`grok`) headless CLI runtimes.
+- 🤖 **Multi-Provider Support**: Supports Google Antigravity (`agy`), Grok Build (`grok`), and Kimi Code (`kimi`) headless CLI runtimes.
 - 📊 **Section 10 Standardized Result Contract**: Uniform `ExecutorResult` schema across all executors (`status`, `executor`, `session_id`, `response`, `exit_code`, `timing`, `usage`, `warnings`, `error`, `raw`).
 - 🎯 **Explicit 1:1 Session Isolation**: Stateless gateway routing where clients hold `session_id` (or legacy `conversation_id`). Zero global `agy -c` preemption.
 - 🔒 **Per-Session Concurrency Lock**: Rejects concurrent turns within the same `(executor, session_id)` with `HTTP 409 Conflict` across both Generic and Legacy endpoints.
-- 🛑 **Unified Admission Control (HTTP 429)**: Global `GATEWAY_MAX_CONCURRENCY` plus independent `AGY_MAX_CONCURRENCY` / `GROK_MAX_CONCURRENCY` semaphores reject saturated work immediately with `HTTP 429`.
+- 🛑 **Unified Admission Control (HTTP 429)**: Defaults allow up to 10 active tasks globally and up to 10 per executor; the shared global cap keeps the total at 10.
 - ⏱️ **Flexible Timeout Budgets**: Per-request `timeout_sec` overrides determine both execution deadline and future waiting windows (+5s transport margin), with automatic process group termination (`SIGKILL via os.killpg`).
 - 🔁 **Intelligent Pre-execution Retry**: Retries transient 0-turn startup errors (EOF/network) up to 3 times on new AGY sessions while preserving in-flight errors.
 - 🟡 **Partial-success Preservation**: Contradictory `ERROR` status with usable output is returned as HTTP 200 `partial_success` with warnings and diagnostic details.
@@ -45,6 +46,7 @@ The optional startup handoff helper (`scripts/install_startup_handoff.py`) is re
 - ⚡ **General Probe Capacity**: The independent 45-POST cap leaves five general HTTP connection slots available for probes and other requests; these slots are not exclusive to `/health`.
 - 🛡️ **Slowloris & Connection Protections**: Socket read timeouts (10s), request body limits (2MB), and max HTTP connection limits (50).
 - 🔄 **Full Legacy ACP Compatibility**: Retains all `/acp/v1/*` endpoints without breaking existing Codex workflows.
+- 🔌 **Codex MCP Adapter**: `mcp_server.py` exposes health plus AGY, Grok, and Kimi tools over the local STDIO MCP transport while keeping the Gateway as the authenticated production boundary.
 
 ---
 
@@ -88,7 +90,31 @@ The optional startup handoff helper (`scripts/install_startup_handoff.py`) is re
                                     └────────────────────────────────┘
 ```
 
+Kimi is registered alongside the AGY and Grok adapters; its CLI uses bounded
+`stream-json` output and session IDs returned by the CLI for follow-up turns.
+
 ---
+
+## 🔌 Codex MCP Integration
+
+Codex can load the local STDIO adapter from the user-level `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.agent_executor_gateway]
+command = "/usr/bin/python3"
+args = ["/workspace/agent-executor-gateway/mcp_server.py"]
+cwd = "/workspace/agent-executor-gateway"
+tool_timeout_sec = 930
+default_tools_approval_mode = "prompt"
+```
+
+The adapter exposes `gateway_health`, `gateway_executor_health`, `agy_invoke`,
+`grok_invoke`, and `kimi_invoke`. Use `kimi_invoke` for frontend implementation;
+Codex retains scope definition, diff review, and regression verification. It
+reads the existing local token file only when invoking a POST endpoint, never
+prints the token, and never starts provider CLIs itself.
+Restart the local Codex client or start a new local session after changing the
+MCP configuration.
 
 ## 📡 REST API Reference
 
@@ -112,6 +138,11 @@ Response:
       "name": "grok",
       "available": true,
       "supports_session": true
+    },
+    {
+      "name": "kimi",
+      "available": true,
+      "supports_session": true
     }
   ]
 }
@@ -122,10 +153,11 @@ No authentication required.
 ```bash
 curl -s http://127.0.0.1:8765/v1/executors/agy/health
 curl -s http://127.0.0.1:8765/v1/executors/grok/health
+curl -s http://127.0.0.1:8765/v1/executors/kimi/health
 ```
 
 #### Invoke Executor Task (`POST /v1/executors/{executor}/invoke`)
-Requires Bearer Token authentication. Supported executors: `agy`, `grok`.
+Requires Bearer Token authentication. Supported executors: `agy`, `grok`, `kimi`.
 
 - **Start New AGY Task**:
 ```bash
@@ -261,8 +293,8 @@ Run machine verification commands and check Git scope boundaries:
 | :--- | :--- | :--- |
 | **Session Model** | Explicit `session_id` / `conversation_id` | Client-held stateless routing; zero `agy -c` preemption |
 | **Session Lock** | `HTTP 409 Conflict` | Protects in-flight turns from concurrent collisions across Generic and Legacy |
-| **Gateway Concurrency** | `GATEWAY_MAX_CONCURRENCY` (Default `2`) | Global bounded semaphore across all executors; overflow returns `HTTP 429` |
-| **Executor Concurrency** | `AGY_MAX_CONCURRENCY=1`, `GROK_MAX_CONCURRENCY=1` | Independent per-executor bounded semaphores; overflow returns `HTTP 429` |
+| **Gateway Concurrency** | `GATEWAY_MAX_CONCURRENCY` (Default `10`) | Global bounded semaphore across all executors; overflow returns `HTTP 429` |
+| **Executor Concurrency** | `AGY_MAX_CONCURRENCY=10`, `GROK_MAX_CONCURRENCY=10`, `KIMI_MAX_CONCURRENCY=10` | Independent per-executor bounded semaphores; the global cap still limits total active tasks to 10 |
 | **Scope Control** | Git status & diff vs allowed/forbidden globs | Rejects boundary violations with `scope_violation` failure |
 | **Machine Verification** | `shell=False` execution in repo `cwd` | Process-group SIGKILL cleanup, credential redaction, and concise tail logging |
 | **Timeout Budget** | Request `timeout_sec` or provider defaults | Monotonic budget; killed via `os.killpg(pgid, SIGKILL)` on expiration |

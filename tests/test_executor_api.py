@@ -314,13 +314,15 @@ class TestExecutorApiHTTP(unittest.TestCase):
         executors = resp["executors"]
         self.assertIsInstance(executors, list)
 
-        # Verified registered executors: agy and grok
-        self.assertEqual(len(executors), 2)
+        # All configured provider adapters are discoverable.
+        self.assertEqual(len(executors), 3)
         exec_map = {e["name"]: e for e in executors}
         self.assertIn("agy", exec_map)
         self.assertIn("grok", exec_map)
+        self.assertIn("kimi", exec_map)
         self.assertTrue(exec_map["agy"]["supports_session"])
         self.assertTrue(exec_map["grok"]["supports_session"])
+        self.assertTrue(exec_map["kimi"]["supports_session"])
 
     def test_04_get_v1_executors_agy_health_delegation(self):
         """GET /v1/executors/agy/health delegates directly to AntigravityAdapter.health()."""

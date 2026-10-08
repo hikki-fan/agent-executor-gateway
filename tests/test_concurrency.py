@@ -89,6 +89,28 @@ class TestUnifiedConcurrency(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        # Keep these saturation tests deterministic even when another test module
+        # imported acp_server first with its own environment/defaults.
+        cls.original_admission_controller = acp_server.admission_controller
+        cls.original_limits = {
+            name: getattr(acp_server, name)
+            for name in (
+                "GATEWAY_MAX_CONCURRENCY",
+                "AGY_MAX_CONCURRENCY",
+                "GROK_MAX_CONCURRENCY",
+                "KIMI_MAX_CONCURRENCY",
+            )
+        }
+        acp_server.GATEWAY_MAX_CONCURRENCY = 2
+        acp_server.AGY_MAX_CONCURRENCY = 1
+        acp_server.GROK_MAX_CONCURRENCY = 1
+        acp_server.KIMI_MAX_CONCURRENCY = 1
+        acp_server.admission_controller = AdmissionController(
+            max_http_connections=50,
+            max_post_connections=45,
+            max_worker_concurrency=2,
+            executor_limits={"agy": 1, "grok": 1, "kimi": 1},
+        )
         cls.server = acp_server.ThreadedHTTPServer(("127.0.0.1", 0), acp_server.ACPRequestHandler)
         cls.server_port = cls.server.server_address[1]
         cls.server_url = f"http://127.0.0.1:{cls.server_port}"
@@ -99,6 +121,9 @@ class TestUnifiedConcurrency(unittest.TestCase):
     def tearDownClass(cls):
         cls.server.shutdown()
         cls.server.server_close()
+        acp_server.admission_controller = cls.original_admission_controller
+        for name, value in cls.original_limits.items():
+            setattr(acp_server, name, value)
         _cleanup_test_tokens()
 
     def _http_request(

@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from orchestration.scope import get_git_changed_and_untracked_files
-from orchestration.task import Task
+from orchestration.task import DEFAULT_FALLBACK_EXECUTORS, Task
 from orchestration.verifier import TaskVerificationResult, redact_sensitive_text
 
 DEFAULT_MAX_SAME_ATTEMPTS = 2
@@ -399,10 +399,9 @@ def evaluate_escalation(
     # Same executor attempts exhausted; check if executor switch is permitted
     if state.switches_used < max_switches:
         # Determine target fallback executor
-        if state.current_executor == "agy":
-            target_executor = task.execution.fallback_executor or "grok"
-        else:
-            target_executor = task.execution.fallback_executor or "agy"
+        target_executor = task.execution.fallback_executor or DEFAULT_FALLBACK_EXECUTORS.get(
+            state.current_executor, "agy"
+        )
 
         # Check that target is actually a switch
         if target_executor != state.current_executor:

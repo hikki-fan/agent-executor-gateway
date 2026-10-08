@@ -5,7 +5,7 @@ Implements the unified Task JSON schema per Goal Prompt Sections 18, 19, 20, 26,
 - version, task_id, parent_task_id, goal
 - repository: path, base_commit
 - classification: complexity (S|M|L|XL), risk (low|medium|high|critical), type
-- execution: executor (agy|grok), fallback_executor, max_same_executor_attempts, max_executor_switches, isolated_worktree
+- execution: executor (agy|grok|kimi), fallback_executor, max_same_executor_attempts, max_executor_switches, isolated_worktree
 - scope: allowed_paths, forbidden_paths
 - acceptance: list[str]
 - verification: commands list[str]
@@ -20,9 +20,11 @@ from typing import Any, Sequence
 
 ALLOWED_COMPLEXITIES = ("S", "M", "L", "XL")
 ALLOWED_RISKS = ("low", "medium", "high", "critical")
-ALLOWED_EXECUTORS = ("agy", "grok")
+ALLOWED_EXECUTORS = ("agy", "grok", "kimi")
+DEFAULT_FALLBACK_EXECUTORS = {"agy": "grok", "grok": "agy", "kimi": "agy"}
 ALLOWED_TASK_TYPES = (
     "feature",
+    "frontend",
     "bugfix",
     "debug",
     "refactor",

@@ -122,6 +122,14 @@ class TestRuleBasedRouter(unittest.TestCase):
             self.assertEqual(decision.executor, "grok", f"Failed for {t_type}")
             self.assertEqual(decision.rule, "medium_debug_investigation_rule")
 
+    def test_frontend_implementation_routes_to_kimi(self):
+        for complexity in ("S", "M"):
+            task = create_task(complexity=complexity, task_type="frontend")
+            decision = route_task(task)
+            self.assertEqual(decision.status, "routed")
+            self.assertEqual(decision.executor, "kimi")
+            self.assertEqual(decision.rule, "frontend_kimi_rule")
+
     def test_04_large_and_xlarge_tasks_require_override(self):
         for comp in ("L", "XL"):
             task = create_task(complexity=comp, risk="medium", task_type="feature")

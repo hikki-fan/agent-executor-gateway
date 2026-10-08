@@ -12,6 +12,7 @@ Encapsulates all Google Antigravity (AGY) provider-specific logic:
 
 from __future__ import annotations
 import json
+import math
 import os
 import re
 import shutil
@@ -32,7 +33,7 @@ RETRYABLE_ERROR_PATTERNS = re.compile(
 )
 
 DEFAULT_AGY_BIN = "/home/codex/.local/bin/agy"
-DEFAULT_AGY_MAX_CONCURRENCY = 1
+DEFAULT_AGY_MAX_CONCURRENCY = 10
 DEFAULT_AGY_TIMEOUT_SEC = 300
 DEFAULT_AGY_AUTH_GRACE_SEC = 30
 
@@ -129,6 +130,7 @@ class AntigravityAdapter(ExecutorAdapter):
         model: str | None = None,
         effort: str | None = None,
         cwd: str | None = None,
+        print_timeout_sec: float | None = None,
     ) -> list[str]:
         """
         Construct agy CLI command with exact Phase 0 flag truthiness and ordering:
@@ -145,6 +147,12 @@ class AntigravityAdapter(ExecutorAdapter):
             cmd.extend(["--model", str(model)])
         if effort:
             cmd.extend(["--effort", str(effort)])
+        if print_timeout_sec is not None:
+            # AGY's print mode otherwise defaults to five minutes, which can
+            # terminate a Gateway request before its caller-provided budget.
+            # The CLI accepts Go duration strings.
+            duration_seconds = max(1, math.ceil(float(print_timeout_sec)))
+            cmd.extend(["--print-timeout", f"{duration_seconds}s"])
         cmd.extend(["-p", str(prompt)])
         return cmd
 
@@ -313,6 +321,7 @@ class AntigravityAdapter(ExecutorAdapter):
             model=model,
             effort=effort,
             cwd=cwd,
+            print_timeout_sec=effective_timeout,
         )
 
         res, parsed = self.execute_with_retry(

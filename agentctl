@@ -31,7 +31,13 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
-from orchestration.task import Task, load_and_validate_task, validate_task_dict
+from orchestration.task import (
+    DEFAULT_FALLBACK_EXECUTORS,
+    ALLOWED_EXECUTORS,
+    Task,
+    load_and_validate_task,
+    validate_task_dict,
+)
 from orchestration.verifier import verify_task
 from orchestration.report import generate_completion_report, record_task_metrics
 from orchestration.router import route_task, RouteDecision
@@ -196,7 +202,7 @@ def cmd_task_plan(args: argparse.Namespace) -> int:
     decision = route_task(task, executor_override=args.override)
 
     primary_executor = decision.executor or task.execution.executor
-    fallback_executor = task.execution.fallback_executor or ("grok" if primary_executor == "agy" else "agy")
+    fallback_executor = task.execution.fallback_executor or DEFAULT_FALLBACK_EXECUTORS[primary_executor]
 
     plan = {
         "task_id": task.task_id,
@@ -500,13 +506,13 @@ def main() -> int:
     # agentctl task route TASK.json
     route_parser = task_subparsers.add_parser("route", help="Evaluate rule-based executor routing for a Task")
     route_parser.add_argument("task_file", help="Path to Task JSON file")
-    route_parser.add_argument("--override", "-o", default=None, choices=["agy", "grok"], help="Explicit executor override")
+    route_parser.add_argument("--override", "-o", default=None, choices=ALLOWED_EXECUTORS, help="Explicit executor override")
     route_parser.add_argument("--json", action="store_true", help="Output routing decision as JSON")
 
     # agentctl task plan TASK.json
     plan_parser = task_subparsers.add_parser("plan", help="Display execution and escalation plan for a Task")
     plan_parser.add_argument("task_file", help="Path to Task JSON file")
-    plan_parser.add_argument("--override", "-o", default=None, choices=["agy", "grok"], help="Explicit executor override")
+    plan_parser.add_argument("--override", "-o", default=None, choices=ALLOWED_EXECUTORS, help="Explicit executor override")
     plan_parser.add_argument("--json", action="store_true", help="Output plan as JSON")
 
     # agentctl task ready TASK1.json [TASK2.json ...]
@@ -530,7 +536,7 @@ def main() -> int:
     # agentctl worktree create TASK.json
     wt_create = wt_subparsers.add_parser("create", help="Create an isolated worktree for a Task")
     wt_create.add_argument("task_file", help="Path to Task JSON file")
-    wt_create.add_argument("--executor", default=None, choices=["agy", "grok"], help="Executor name override")
+    wt_create.add_argument("--executor", default=None, choices=ALLOWED_EXECUTORS, help="Executor name override")
     wt_create.add_argument("--root", default=None, help="Root directory for worktrees")
     wt_create.add_argument("--json", action="store_true", help="Output as JSON")
 
@@ -556,7 +562,7 @@ def main() -> int:
 
     # 5. agentctl invoke <executor> --prompt ... --cwd ...
     inv_parser = subparsers.add_parser("invoke", help="Invoke an executor with prompt")
-    inv_parser.add_argument("executor", choices=["agy", "grok"], help="Executor name")
+    inv_parser.add_argument("executor", choices=ALLOWED_EXECUTORS, help="Executor name")
     inv_parser.add_argument("--prompt", "-p", required=True, help="Task instruction prompt")
     inv_parser.add_argument("--cwd", default=None, help="Working directory for executor")
     inv_parser.add_argument("--session-id", "-s", default=None, help="Existing session ID to resume")

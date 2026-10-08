@@ -2,7 +2,8 @@
 Rule-Based Task Router for Agent Executor Gateway (Phase 7).
 
 Implements Goal Prompt Section 22 & Section 49:
-- S (Low/High) -> agy
+- S (Low/High) -> agy, except frontend implementation -> kimi
+- M Frontend implementation -> kimi
 - M Feature / Bugfix / Refactor -> agy
 - M Debug / Investigation -> grok
 - L / XL -> Manual decomposition / Codex override required (no auto-run)
@@ -44,8 +45,9 @@ def route_task(
     Priority order:
     1. Explicit override (CLI argument or explicit override request) takes absolute precedence.
     2. L / XL complexity requires manual decomposition / Codex override.
-    3. M Debug / Investigation routes to Grok.
-    4. S and M Feature/Bugfix/Refactor route to Antigravity (agy).
+    3. S/M frontend implementation tasks route to Kimi.
+    4. M Debug / Investigation tasks route to Grok.
+    5. Other S/M tasks route to Antigravity (agy).
     """
     task_id = task.task_id
     complexity = task.classification.complexity.upper()
@@ -94,7 +96,22 @@ def route_task(
             reason=f"{complexity} complexity tasks require manual decomposition or explicit Codex override before execution",
         )
 
-    # 3. Medium Debug / Investigation tasks -> Grok
+    # 3. Frontend implementation has an explicit Kimi lane, including small tasks.
+    if task_type == "frontend":
+        requires_review = risk in ("high", "critical")
+        return RouteDecision(
+            task_id=task_id,
+            executor="kimi",
+            status="routed",
+            rule="frontend_kimi_rule",
+            complexity=complexity,
+            risk=risk,
+            task_type=task_type,
+            requires_human_review=requires_review,
+            reason="Frontend implementation tasks route to Kimi; Codex retains independent review and acceptance",
+        )
+
+    # 4. Medium Debug / Investigation tasks -> Grok
     if complexity == "M" and task_type in ("debug", "investigation"):
         requires_review = (risk in ("high", "critical"))
         return RouteDecision(
@@ -109,7 +126,7 @@ def route_task(
             reason=f"Medium {task_type} tasks route to Grok for deep diagnostic analysis",
         )
 
-    # 4. Small tasks (S Low / S High) and Medium Feature/Bugfix/Refactor -> Antigravity (agy)
+    # 5. Other small and medium tasks -> Antigravity (agy)
     requires_review = (risk in ("high", "critical"))
     rule_name = "small_task_agy_rule" if complexity == "S" else "medium_feature_agy_rule"
     reason_text = (
