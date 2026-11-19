@@ -101,7 +101,7 @@ def parse_grok_json(stdout_text: str) -> dict[str, Any] | None:
         parsed = json.loads(text)
         if isinstance(parsed, dict):
             return parsed
-    except Exception:
+    except json.JSONDecodeError:
         pass
 
     # Fallback: attempt to locate outermost JSON object { ... }
@@ -112,7 +112,7 @@ def parse_grok_json(stdout_text: str) -> dict[str, Any] | None:
             parsed = json.loads(text[start : end + 1])
             if isinstance(parsed, dict):
                 return parsed
-        except Exception:
+        except json.JSONDecodeError:
             pass
     return None
 

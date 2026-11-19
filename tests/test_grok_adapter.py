@@ -225,6 +225,11 @@ class TestGrokAdapterUnit(unittest.TestCase):
         self.assertIsNone(parse_grok_json("Not a json at all"))
         self.assertIsNone(parse_grok_json("{unclosed json"))
 
+    def test_parser_fault_is_not_invalid_provider_output(self):
+        with patch("adapters.grok.json.loads", side_effect=NameError("decoder fault")):
+            with self.assertRaises(NameError):
+                parse_grok_json('{"text":"ok"}')
+
     def test_06_usage_and_cost_normalization(self):
         """extract_grok_usage normalizes Grok token counts and cost to standard Section 10 schema."""
         parsed_grok_output = {
